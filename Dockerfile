@@ -119,9 +119,18 @@ RUN mkdir -p ./model && \
     echo "=== Model Download Debug ===" && \
     echo "MODEL_ID ARG value: '${MODEL_ID:-not_set}'" && \
     echo "HF_TOKEN ARG value: '${HF_TOKEN:-not_set}'" && \
-    /app/venv/bin/python -c "import os; model_id = '${MODEL_ID}' if '${MODEL_ID}' else None; token = '${HF_TOKEN}' if '${HF_TOKEN}' else None; print(f'Using MODEL_ID: {model_id}'); print(f'MODEL_ID is None: {model_id is None}'); print(f'MODEL_ID is empty: {model_id == \"\"}'); model_id = model_id.strip() if model_id and model_id != 'not_set' else None; from huggingface_hub import snapshot_download; (print(f'Downloading model: {model_id}') or snapshot_download(repo_id=model_id, local_dir='./model', token=token)) if model_id and model_id != 'not_set' else print('WARNING: MODEL_ID not set - model will not be downloaded. Set MODEL_ID as environment variable in Render Dashboard.')" && \
+    /app/venv/bin/python -c "import os; model_id = '${MODEL_ID}' if '${MODEL_ID}' else None; token = '${HF_TOKEN}' if '${HF_TOKEN}' else None; print(f'Using MODEL_ID: {model_id}'); model_id = model_id.strip() if model_id and model_id != 'not_set' else None; from huggingface_hub import snapshot_download; (print(f'Downloading model: {model_id}') or snapshot_download(repo_id=model_id, local_dir='./model', token=token)) if model_id and model_id != 'not_set' else print('WARNING: MODEL_ID not set - model will not be downloaded. Set MODEL_ID as environment variable in Render Dashboard.')" && \
     echo "=== Model Download Complete ===" && \
-    ls -lh ./model/ 2>/dev/null || echo "Note: Model directory listing unavailable"
+    echo "=== Verifying Model Files ===" && \
+    echo "File count:" && \
+    ls -1 ./model/ 2>/dev/null | wc -l && \
+    echo "All files with sizes:" && \
+    ls -lh ./model/ 2>/dev/null || echo "Note: Model directory listing unavailable" && \
+    echo "Checking for critical files:" && \
+    (test -f ./model/model.safetensors && echo "✓ model.safetensors found" || echo "✗ model.safetensors missing") && \
+    (test -f ./model/config.json && echo "✓ config.json found" || echo "✗ config.json missing") && \
+    (test -f ./model/tokenizer.json && echo "✓ tokenizer.json found" || echo "✗ tokenizer.json missing") && \
+    echo "=== Verification Complete ==="
 
 # Create non-root user for runtime security
 RUN useradd -m -u 1000 appuser && \
