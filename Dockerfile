@@ -111,10 +111,16 @@ COPY . .
 
 # Download model from Hugging Face during deployment (as root, before switching user)
 # This solves Git LFS issues by downloading model at build time instead of from Git
-# MODEL_ID should be set as environment variable in Render Dashboard (available during build)
+# MODEL_ID should be set as environment variable in Render Dashboard
+# Render passes environment variables to Docker build, so we use ARG to capture them
+ARG MODEL_ID
+ARG HF_TOKEN
 RUN mkdir -p ./model && \
-    /app/venv/bin/python -c "from huggingface_hub import snapshot_download; import os; model_id = os.environ.get('MODEL_ID'); token = os.environ.get('HF_TOKEN') or None; print(f'MODEL_ID from env: {model_id}'); snapshot_download(repo_id=model_id, local_dir='./model', token=token) if model_id else print('WARNING: MODEL_ID not set - model will not be downloaded. Set MODEL_ID as environment variable in Render Dashboard.')" && \
-    echo "Model download process completed" && \
+    echo "=== Model Download Debug ===" && \
+    echo "MODEL_ID ARG value: '${MODEL_ID:-not_set}'" && \
+    echo "HF_TOKEN ARG value: '${HF_TOKEN:-not_set}'" && \
+    /app/venv/bin/python -c "import os; model_id = '${MODEL_ID}' if '${MODEL_ID}' else None; token = '${HF_TOKEN}' if '${HF_TOKEN}' else None; print(f'Using MODEL_ID: {model_id}'); print(f'MODEL_ID is None: {model_id is None}'); print(f'MODEL_ID is empty: {model_id == \"\"}'); model_id = model_id.strip() if model_id and model_id != 'not_set' else None; from huggingface_hub import snapshot_download; (print(f'Downloading model: {model_id}') or snapshot_download(repo_id=model_id, local_dir='./model', token=token)) if model_id and model_id != 'not_set' else print('WARNING: MODEL_ID not set - model will not be downloaded. Set MODEL_ID as environment variable in Render Dashboard.')" && \
+    echo "=== Model Download Complete ===" && \
     ls -lh ./model/ 2>/dev/null || echo "Note: Model directory listing unavailable"
 
 # Create non-root user for runtime security
