@@ -32,6 +32,11 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 # Set working directory
 WORKDIR /app
 
+# Create virtual environment to avoid pip warnings
+RUN python -m venv /app/venv
+ENV VIRTUAL_ENV=/app/venv \
+    PATH="/app/venv/bin:$PATH"
+
 # Copy requirements first for better Docker layer caching
 COPY requirements.txt .
 
@@ -104,7 +109,7 @@ RUN pip install --no-cache-dir \
 # Copy application code
 COPY . .
 
-# Download model from Hugging Face during deployment
+# Download model from Hugging Face during deployment (as root, before switching user)
 # This solves Git LFS issues by downloading model at build time instead of from Git
 # MODEL_ID should be set as environment variable in Render Dashboard (available during build)
 RUN mkdir -p ./model && \
@@ -112,9 +117,18 @@ RUN mkdir -p ./model && \
     echo "Model download process completed" && \
     ls -lh ./model/ 2>/dev/null || echo "Note: Model directory listing unavailable"
 
-# Create necessary directories
+# Create non-root user for runtime security
+RUN useradd -m -u 1000 appuser && \
+    chown -R appuser:appuser /app && \
+    chmod -R 755 /app
+
+# Create necessary directories with proper permissions
 RUN mkdir -p /tmp/uploads /tmp/cache /tmp/outputs && \
-    chmod -R 755 /tmp
+    chmod -R 755 /tmp && \
+    chown -R appuser:appuser /tmp/uploads /tmp/cache /tmp/outputs || true
+
+# Switch to non-root user for security (after all build steps)
+USER appuser
 
 # Expose port (supports PORT env var for Cloud Run, defaults to 8000)
 EXPOSE 8000
