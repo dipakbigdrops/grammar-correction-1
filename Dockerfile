@@ -46,8 +46,8 @@ RUN python -m venv /app/venv
 ENV VIRTUAL_ENV=/app/venv \
     PATH="/app/venv/bin:$PATH"
 
-# Copy requirements first for better Docker layer caching
-COPY requirements.txt .
+# Copy requirements and constraints first for better Docker layer caching
+COPY requirements.txt constraints.txt .
 
 # Skip Git LFS during build (prevents LFS download failures)
 ENV GIT_LFS_SKIP_SMUDGE=1
@@ -57,18 +57,19 @@ ENV GIT_LFS_SKIP_SMUDGE=1
 RUN /app/venv/bin/pip install --upgrade pip setuptools wheel cython
 
 # Install numpy first (critical, and some packages depend on it)
-RUN /app/venv/bin/pip install --no-cache-dir "numpy==1.26.4"
+# Use constraints to prevent any upgrades
+RUN /app/venv/bin/pip install --no-cache-dir --constraint constraints.txt "numpy==1.26.4"
 
 # Force numpy version before any other ML packages
-RUN /app/venv/bin/pip install --no-cache-dir --force-reinstall "numpy==1.26.4"
+RUN /app/venv/bin/pip install --no-cache-dir --force-reinstall --constraint constraints.txt "numpy==1.26.4"
 
 # Install Pydantic FIRST (FastAPI depends on it)
-RUN /app/venv/bin/pip install --no-cache-dir \
+RUN /app/venv/bin/pip install --no-cache-dir --constraint constraints.txt \
     "pydantic>=2.5.0,<3.0.0" \
     "pydantic-settings>=2.1.0,<3.0.0"
 
 # Install PyTorch dependencies first (required when using --no-deps)
-RUN /app/venv/bin/pip install --no-cache-dir \
+RUN /app/venv/bin/pip install --no-cache-dir --constraint constraints.txt \
     "typing-extensions>=4.8.0" \
     "filelock>=3.9.0" \
     "networkx>=2.6.0" \
@@ -87,37 +88,38 @@ RUN /app/venv/bin/pip install --no-cache-dir \
     --no-deps
 
 # Force numpy version after PyTorch installation
-RUN /app/venv/bin/pip install --no-cache-dir --force-reinstall "numpy==1.26.4"
+RUN /app/venv/bin/pip install --no-cache-dir --force-reinstall --constraint constraints.txt "numpy==1.26.4"
 
 # Install web framework dependencies (FastAPI needs Pydantic already installed)
-RUN /app/venv/bin/pip install --no-cache-dir \
+RUN /app/venv/bin/pip install --no-cache-dir --constraint constraints.txt \
     "fastapi>=0.104.0,<1.0.0" \
     "uvicorn[standard]>=0.24.0,<1.0.0" \
     "python-multipart>=0.0.6,<1.0.0"
 
 # Install async and HTTP clients
-RUN /app/venv/bin/pip install --no-cache-dir \
+RUN /app/venv/bin/pip install --no-cache-dir --constraint constraints.txt \
     "aiofiles>=23.2.0,<24.0.0" \
     "aiohttp>=3.9.0,<4.0.0" \
     "requests>=2.31.0,<3.0.0" \
     "httpx>=0.25.0,<1.0.0"
 
 # Install HTML processing (lxml can be problematic, install separately)
-RUN /app/venv/bin/pip install --no-cache-dir "beautifulsoup4>=4.12.0,<5.0.0" && \
-    /app/venv/bin/pip install --no-cache-dir "lxml>=4.9.0,<5.0.0"
+RUN /app/venv/bin/pip install --no-cache-dir --constraint constraints.txt "beautifulsoup4>=4.12.0,<5.0.0" && \
+    /app/venv/bin/pip install --no-cache-dir --constraint constraints.txt "lxml>=4.9.0,<5.0.0"
 
 # Install Redis (simple packages)
-RUN /app/venv/bin/pip install --no-cache-dir \
+RUN /app/venv/bin/pip install --no-cache-dir --constraint constraints.txt \
     "redis>=4.6.0,<5.0.0" \
     "fakeredis>=2.32.0,<3.0.0"
 
 # Install Celery and Flower (can be memory intensive)
-RUN /app/venv/bin/pip install --no-cache-dir "celery[redis]>=5.3.0,<6.0.0" && \
-    /app/venv/bin/pip install --no-cache-dir "flower>=2.0.0,<3.0.0"
+RUN /app/venv/bin/pip install --no-cache-dir --constraint constraints.txt "celery[redis]>=5.3.0,<6.0.0" && \
+    /app/venv/bin/pip install --no-cache-dir --constraint constraints.txt "flower>=2.0.0,<3.0.0"
 
 # Install ML/transformers dependencies (after PyTorch and numpy)
 # Pin transformers to compatible version with PyTorch 2.2.0
-RUN /app/venv/bin/pip install --no-cache-dir \
+# Use constraints to prevent numpy/opencv upgrades
+RUN /app/venv/bin/pip install --no-cache-dir --constraint constraints.txt \
     "tokenizers>=0.13.0,<1.0.0" \
     "sentencepiece>=0.2.0,<1.0.0" \
     "safetensors>=0.3.0,<1.0.0" \
@@ -129,20 +131,23 @@ RUN /app/venv/bin/pip install --no-cache-dir \
     "easyocr>=1.7.0,<2.0.0"
 
 # Force opencv version after easyocr (easyocr may try to upgrade opencv)
-RUN /app/venv/bin/pip install --no-cache-dir --force-reinstall "opencv-python-headless==4.9.0.80"
+RUN /app/venv/bin/pip install --no-cache-dir --force-reinstall --constraint constraints.txt "opencv-python-headless==4.9.0.80"
 
 # Force protobuf version after transformers (transformers may pull different version)
-RUN /app/venv/bin/pip install --no-cache-dir --force-reinstall "protobuf==4.25.3"
+RUN /app/venv/bin/pip install --no-cache-dir --force-reinstall --constraint constraints.txt "protobuf==4.25.3"
 
 # Install remaining utilities
-RUN /app/venv/bin/pip install --no-cache-dir \
+RUN /app/venv/bin/pip install --no-cache-dir --constraint constraints.txt \
     "python-dotenv>=1.0.0,<2.0.0" \
     "prometheus-client>=0.19.0,<1.0.0"
 
 # Final numpy, protobuf, and opencv version enforcement after all dependencies
-RUN /app/venv/bin/pip install --no-cache-dir --force-reinstall "numpy==1.26.4" && \
-    /app/venv/bin/pip install --no-cache-dir --force-reinstall "protobuf==4.25.3" && \
-    /app/venv/bin/pip install --no-cache-dir --force-reinstall "opencv-python-headless==4.9.0.80"
+RUN /app/venv/bin/pip install --no-cache-dir --force-reinstall --constraint constraints.txt "numpy==1.26.4" && \
+    /app/venv/bin/pip install --no-cache-dir --force-reinstall --constraint constraints.txt "protobuf==4.25.3" && \
+    /app/venv/bin/pip install --no-cache-dir --force-reinstall --constraint constraints.txt "opencv-python-headless==4.9.0.80"
+
+# Verify numpy version is correct (fail build if wrong version)
+RUN /app/venv/bin/python -c "import numpy; assert numpy.__version__ == '1.26.4', f'NumPy version mismatch! Expected 1.26.4, got {numpy.__version__}'; print(f'✓ NumPy version verified: {numpy.__version__}')" || exit 1
 
 # Copy application code
 COPY . .
@@ -183,4 +188,5 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
     CMD curl -f http://localhost:${PORT:-8000}/health || exit 1
 
 # Run the application (using virtual environment)
-CMD ["sh", "-c", "/app/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+# Verify NumPy version at runtime before starting
+CMD ["sh", "-c", "/app/venv/bin/python -c \"import numpy; assert numpy.__version__.startswith('1.26'), f'CRITICAL: NumPy version {numpy.__version__} is incompatible! Expected 1.26.x'; print(f'✓ Runtime NumPy check: {numpy.__version__}')\" && /app/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]

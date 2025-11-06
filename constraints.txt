@@ -1,0 +1,6 @@
+# Version constraints to prevent dependency conflicts
+numpy==1.26.4
+protobuf==4.25.3
+opencv-python-headless==4.9.0.80
+pillow==10.4.0
+
