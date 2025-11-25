@@ -315,8 +315,13 @@ async def process_file(
     format: Optional[str] = Query(default="json", description="Response format: 'json' or 'html' (for HTML input only)")
 ):
     try:
+        # Store filename before reading (file object may become unavailable)
+        original_filename = file.filename
+        if not original_filename:
+            original_filename = "unnamed_file"
+        
         # Validate file extension
-        file_extension = os.path.splitext(file.filename)[1].lower()
+        file_extension = os.path.splitext(original_filename)[1].lower()
         
         allowed_extensions = (
             settings.ALLOWED_IMAGE_EXTENSIONS + 
@@ -328,9 +333,6 @@ async def process_file(
                 status_code=400,
                 detail=f"Unsupported file type. Allowed: {', '.join(allowed_extensions)}"
             )
-        
-        # Store filename before reading (file object may become unavailable)
-        original_filename = file.filename
         
         # Read file content
         file_content = await file.read()
@@ -487,7 +489,14 @@ async def download_file(filename: str):
     
     - **filename**: Name of the output file
     """
+    # Sanitize filename to prevent path traversal attacks
+    filename = os.path.basename(filename)
+    
     file_path = os.path.join("/tmp/outputs", filename)
+    
+    # Additional security check: ensure file is within the outputs directory
+    if not os.path.abspath(file_path).startswith(os.path.abspath("/tmp/outputs")):
+        raise HTTPException(status_code=400, detail="Invalid file path")
     
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="File not found")
