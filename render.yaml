@@ -1,0 +1,46 @@
+services:
+  # Main API Service
+  - type: web
+    name: grammar-correction-api
+    env: docker
+    plan: standard # Standard tier (2GB RAM) recommended for PyTorch + Model
+    region: oregon # Choose the region closest to your users
+    buildCommand: docker build --build-arg MODEL_ID=dipak-bigdrops/grammar-correction-model -t grammar-api .
+    startCommand: ./deploy.sh # Dockerfile CMD handles this, but Render sometimes needs a command. Leaving empty uses Dockerfile CMD.
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: GIT_LFS_SKIP_SMUDGE
+        value: 1
+      - key: MODEL_ID
+        value: dipak-bigdrops/grammar-correction-model
+      - key: MODEL_PATH
+        value: ./model
+      - key: APP_NAME
+        value: Grammar Correction API
+      - key: ENVIRONMENT
+        value: production
+      - key: DEBUG
+        value: false
+      - key: REDIS_URL
+        fromService: grammar-correction-redis
+        property: connectionString
+      - key: REDIS_HOST
+        fromService: grammar-correction-redis
+        property: host
+      - key: REDIS_PORT
+        fromService: grammar-correction-redis
+        property: port
+      - key: ALLOWED_ORIGINS
+        value: '["*"]'
+      - key: PORT
+        value: 10000
+    healthCheckPath: /health
+    autoDeploy: true
+
+  # Redis Service (for caching and Celery)
+  - type: redis
+    name: grammar-correction-redis
+    region: oregon
+    plan: free # Free tier is fine for simple caching
+    ipAllowList: [] # Allow connections only from internal services
