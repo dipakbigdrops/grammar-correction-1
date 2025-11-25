@@ -127,6 +127,10 @@ def save_uploaded_file(file_content: bytes, filename: str, upload_dir: str = "/t
     """Save uploaded file and return path"""
     os.makedirs(upload_dir, exist_ok=True)
     
+    # Handle None or empty filename
+    if not filename:
+        filename = "unnamed_file"
+    
     # Generate unique filename
     file_hash = hashlib.md5(file_content).hexdigest()[:8]
     base_name, ext = os.path.splitext(filename)
