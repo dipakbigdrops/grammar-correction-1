@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     # OCR Settings
     OCR_LANGUAGES: list = ["en"]
     OCR_CONFIDENCE_THRESHOLD: float = 0.5
+    OCR_MODEL_DIR: str = "/app/.EasyOCR/model"  # Persistent model directory in Docker image
     
     # Processing Settings
     MAX_FILE_SIZE: int = 10 * 1024 * 1024  # 10MB

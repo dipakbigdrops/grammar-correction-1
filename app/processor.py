@@ -111,8 +111,22 @@ class GrammarCorrectionProcessor:
         """Initialize OCR reader for text extraction from images"""
         try:
             import easyocr  # pylint: disable=import-outside-toplevel
-            self.ocr_reader = easyocr.Reader(['en'])
-            logger.info("OCR initialized")
+            import os
+            
+            # Use persistent model directory from settings
+            model_dir = getattr(settings, 'OCR_MODEL_DIR', '/app/.EasyOCR/model')
+            
+            # Ensure model directory exists
+            os.makedirs(model_dir, exist_ok=True)
+            
+            # Initialize EasyOCR with persistent model directory
+            # This prevents re-downloading models on every request
+            self.ocr_reader = easyocr.Reader(
+                ['en'],
+                model_storage_directory=model_dir,
+                gpu=False  # Explicitly disable GPU (Render doesn't provide GPU)
+            )
+            logger.info("OCR initialized with model directory: %s", model_dir)
         except (ImportError, OSError, RuntimeError) as e:
             logger.warning("OCR not available: %s", e)
             self.ocr_reader = None

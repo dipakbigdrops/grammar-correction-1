@@ -169,15 +169,23 @@ RUN mkdir -p ./model && \
     echo "=== Model Download Complete ===" && \
     ls -lh ./model/ 2>/dev/null || echo "Note: Model directory listing unavailable"
 
+# Pre-download EasyOCR models during build to prevent runtime downloads
+# This ensures models are cached in the Docker image and persist across requests
+RUN echo "=== Pre-downloading EasyOCR Models ===" && \
+    mkdir -p /app/.EasyOCR/model && \
+    /app/venv/bin/python -c "import easyocr; import os; import sys; model_dir = '/app/.EasyOCR/model'; os.makedirs(model_dir, exist_ok=True); print('Initializing EasyOCR Reader to pre-download models to', model_dir, '...'); reader = easyocr.Reader(['en'], model_storage_directory=model_dir, gpu=False); print('✓ EasyOCR models pre-downloaded successfully'); files = os.listdir(model_dir); print('✓ Found', len(files), 'model files') if files else print('⚠ Warning: No model files found'); sys.exit(0 if files else 1)" && \
+    echo "=== EasyOCR Model Download Complete ===" && \
+    ls -lh /app/.EasyOCR/model/ 2>/dev/null || echo "Note: EasyOCR model directory listing unavailable"
+
 # Create non-root user for runtime security
 RUN useradd -m -u 1000 appuser && \
     chown -R appuser:appuser /app && \
     chmod -R 755 /app
 
 # Create necessary directories with proper permissions
-RUN mkdir -p /tmp/uploads /tmp/cache /tmp/outputs && \
-    chmod -R 755 /tmp && \
-    chown -R appuser:appuser /tmp/uploads /tmp/cache /tmp/outputs || true
+RUN mkdir -p /tmp/uploads /tmp/cache /tmp/outputs /app/.EasyOCR/model && \
+    chmod -R 755 /tmp /app/.EasyOCR && \
+    chown -R appuser:appuser /tmp/uploads /tmp/cache /tmp/outputs /app/.EasyOCR || true
 
 # Switch to non-root user for security (after all build steps)
 USER appuser
