@@ -221,8 +221,46 @@ class GrammarCorrectionProcessor:
                 return [], []
 
             try:
+                # Memory optimization: Resize large images before OCR to reduce memory usage
+                # This prevents OOM kills on limited RAM (2GB) systems
+                max_dimension = 2048  # Maximum width or height
+                original_content_path = content
+                temp_file_created = False
+                
+                img = Image.open(content)
+                original_size = img.size
+                
+                # Resize if image is too large
+                if max(img.size) > max_dimension:
+                    ratio = max_dimension / max(img.size)
+                    new_size = (int(img.size[0] * ratio), int(img.size[1] * ratio))
+                    img = img.resize(new_size, Image.Resampling.LANCZOS)
+                    logger.info("Resized image from %s to %s for memory efficiency", original_size, new_size)
+                    
+                    # Save resized image temporarily
+                    import tempfile
+                    temp_path = tempfile.mktemp(suffix='.jpg')
+                    img.save(temp_path, 'JPEG', quality=85, optimize=True)
+                    img.close()  # Free memory
+                    content = temp_path
+                    temp_file_created = True
+                else:
+                    img.close()  # Close even if not resized to free memory
+                
                 results = self.ocr_reader.readtext(content)
                 extracted_texts = [item[1] for item in results]
+                
+                # Clean up temporary file if created
+                if temp_file_created and os.path.exists(content):
+                    try:
+                        os.unlink(content)
+                    except OSError:
+                        pass
+                
+                # Force garbage collection to free memory
+                import gc
+                gc.collect()
+                
                 return extracted_texts, results
             except (OSError, ValueError, AttributeError) as e:
                 logger.error("Error during OCR: %s", e)
@@ -729,7 +767,17 @@ class GrammarCorrectionProcessor:
 
             try:
                 # Load the original image using the path
+                # Memory optimization: Load image efficiently
                 img = Image.open(original_content).convert("RGB")
+                
+                # Resize if too large to prevent memory issues
+                max_dimension = 2048
+                if max(img.size) > max_dimension:
+                    ratio = max_dimension / max(img.size)
+                    new_size = (int(img.size[0] * ratio), int(img.size[1] * ratio))
+                    img = img.resize(new_size, Image.Resampling.LANCZOS)
+                    logger.info("Resized image for reconstruction from %s to %s", Image.open(original_content).size, new_size)
+                
                 draw = ImageDraw.Draw(img)
 
                 # Create a set of original words that were corrected for quick lookup
@@ -775,10 +823,17 @@ class GrammarCorrectionProcessor:
                                 # Draw a highlight (red rectangle border) around the approximate word bounding box
                                 draw.rectangle([(word_x1, word_y1), (word_x2, word_y2)], outline='red', width=2)
 
+                # Force garbage collection before returning
+                import gc
+                gc.collect()
+                
                 return img  # Return the PIL Image object
 
             except (OSError, IOError, ValueError) as e:
                 logger.error("Error processing image for highlighting: %s", e)
+                # Clean up on error
+                import gc
+                gc.collect()
                 return None
 
         if input_type == 'html':
@@ -984,11 +1039,18 @@ class GrammarCorrectionProcessor:
         if input_type == 'image':
             if isinstance(reconstructed_content, Image.Image):
                 try:
+                    # Memory optimization: Use JPEG instead of PNG for smaller size
                     # Convert image to base64 instead of saving to disk
                     buffered = BytesIO()
-                    reconstructed_content.save(buffered, format="PNG")
+                    # Use JPEG with quality 85 for smaller file size and less memory
+                    if reconstructed_content.mode == 'RGBA':
+                        reconstructed_content = reconstructed_content.convert('RGB')
+                    reconstructed_content.save(buffered, format="JPEG", quality=85, optimize=True)
                     img_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
-                    content_output = f"data:image/png;base64,{img_base64}"
+                    content_output = f"data:image/jpeg;base64,{img_base64}"
+                    # Close image and clear buffer to free memory
+                    reconstructed_content.close()
+                    buffered.close()
                     logger.info("Image converted to base64 successfully")
                 except (OSError, IOError) as e:
                     logger.error("Error converting image to base64: %s", e)
@@ -1097,6 +1159,10 @@ class GrammarCorrectionProcessor:
 
             processing_time = time.time() - start_time
 
+            # Memory optimization: Force garbage collection after processing
+            import gc
+            gc.collect()
+
             return {
                 "success": True,
                 "input_type": input_type,
@@ -1110,6 +1176,9 @@ class GrammarCorrectionProcessor:
 
         except (OSError, RuntimeError, ValueError) as e:
             logger.error("Error in process_input: %s", e, exc_info=True)
+            # Clean up memory on error
+            import gc
+            gc.collect()
             return {
                 "success": False,
                 "error": str(e),

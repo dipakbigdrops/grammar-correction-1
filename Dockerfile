@@ -201,4 +201,5 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
 
 # Run the application (using virtual environment)
 # Verify NumPy version at runtime before starting
-CMD ["sh", "-c", "/app/venv/bin/python -c \"import numpy; assert numpy.__version__.startswith('1.26'), f'CRITICAL: NumPy version {numpy.__version__} is incompatible! Expected 1.26.x'; print(f'✓ Runtime NumPy check: {numpy.__version__}')\" && /app/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+# Use single worker for 2GB RAM plan to prevent OOM kills
+CMD ["sh", "-c", "/app/venv/bin/python -c \"import numpy; assert numpy.__version__.startswith('1.26'), f'CRITICAL: NumPy version {numpy.__version__} is incompatible! Expected 1.26.x'; print(f'✓ Runtime NumPy check: {numpy.__version__}')\" && /app/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1"]

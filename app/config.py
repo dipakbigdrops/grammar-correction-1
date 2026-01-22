@@ -47,7 +47,7 @@ class Settings(BaseSettings):
     OCR_MODEL_DIR: str = "/app/.EasyOCR/model"  # Persistent model directory in Docker image
     
     # Processing Settings
-    MAX_FILE_SIZE: int = 10 * 1024 * 1024  # 10MB
+    MAX_FILE_SIZE: int = 5 * 1024 * 1024  # 5MB (reduced for 2GB RAM plan)
     ALLOWED_IMAGE_EXTENSIONS: list = [".jpg", ".jpeg", ".png"]
     ALLOWED_HTML_EXTENSIONS: list = [".html", ".htm"]
     ALLOWED_ARCHIVE_EXTENSIONS: list = [".zip"]
