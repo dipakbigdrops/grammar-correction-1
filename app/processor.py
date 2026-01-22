@@ -87,13 +87,32 @@ class GrammarCorrectionProcessor:
 
                 if self.model is not None and self.tokenizer is not None:
                     logger.info(" Model loaded successfully with ultimate robust loader")
+                    
+                    # CPU optimization: Set model to eval mode and CPU, limit threads
+                    self.model.eval()
+                    self.model.to('cpu')
+                    
+                    # Limit PyTorch CPU threads to prevent CPU exhaustion (critical for 1 CPU plan)
+                    torch.set_num_threads(1)  # Use only 1 thread to prevent CPU overload
+                    torch.set_num_interop_threads(1)
+                    
+                    # Disable gradient computation for inference (saves memory and CPU)
+                    for param in self.model.parameters():
+                        param.requires_grad = False
 
                     # Test the model with a simple inference
                     try:
                         test_result = test_model_inference(self.model, self.tokenizer, "This is a test.")
                         logger.info(" Model test successful: '%s'", test_result)
+                        # Ensure model stays optimized after test (test function may change device/state)
+                        self.model.eval()
+                        self.model.to('cpu')
                     except (RuntimeError, AttributeError) as test_e:
                         logger.warning("Model test failed but model loaded: %s", test_e)
+                        # Ensure model is still optimized even if test fails
+                        if self.model is not None:
+                            self.model.eval()
+                            self.model.to('cpu')
                 else:
                     logger.warning(" Model loading failed, using fallback")
                     self.model = None
@@ -119,12 +138,17 @@ class GrammarCorrectionProcessor:
             # Ensure model directory exists
             os.makedirs(model_dir, exist_ok=True)
             
+            # CPU optimization: Limit threads for OCR to prevent CPU exhaustion
+            os.environ['OMP_NUM_THREADS'] = '1'  # Limit OpenMP threads for OCR
+            os.environ['MKL_NUM_THREADS'] = '1'  # Limit MKL threads
+            
             # Initialize EasyOCR with persistent model directory
             # This prevents re-downloading models on every request
             self.ocr_reader = easyocr.Reader(
                 ['en'],
                 model_storage_directory=model_dir,
-                gpu=False  # Explicitly disable GPU (Render doesn't provide GPU)
+                gpu=False,  # Explicitly disable GPU (Render doesn't provide GPU)
+                verbose=False  # Reduce logging overhead
             )
             logger.info("OCR initialized with model directory: %s", model_dir)
         except (ImportError, OSError, RuntimeError) as e:
@@ -339,9 +363,12 @@ class GrammarCorrectionProcessor:
     def _correct_grammar_chunk(self, text: str) -> str:
         """Correct grammar for a single chunk of text"""
         try:
-            # Use the exact same logic as googlecolab.py
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            self.model.to(device)
+            # CPU optimization: Model is already on CPU and in eval mode
+            # No need to move to device on every call (saves CPU cycles)
+            device = torch.device("cpu")  # Always use CPU (Render doesn't provide GPU)
+            
+            # Ensure model is in eval mode (disable dropout, batch norm updates)
+            self.model.eval()
 
             # Tokenize the input text (exactly like googlecolab.py)
             inputs = self.tokenizer(text, return_tensors="pt", padding=True, truncation=True, max_length=128)
@@ -349,13 +376,16 @@ class GrammarCorrectionProcessor:
             attention_mask = inputs['attention_mask'].to(device)
 
             # Generate the corrected text (exactly like googlecolab.py)
+            # CPU optimization: Use fewer beams and disable gradient computation
             with torch.no_grad():
                 generated_ids = self.model.generate(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
                     max_length=128,
-                    num_beams=5,  # Beam search for better quality
-                    early_stopping=True
+                    num_beams=3,  # Reduced from 5 to 3 for lower CPU usage
+                    early_stopping=True,
+                    do_sample=False,  # Disable sampling for deterministic, faster inference
+                    num_return_sequences=1  # Only return one sequence
                 )
 
             # Decode the generated IDs to text
