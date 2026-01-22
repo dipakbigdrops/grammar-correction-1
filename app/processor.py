@@ -226,6 +226,7 @@ class GrammarCorrectionProcessor:
                 max_dimension = 2048  # Maximum width or height
                 original_content_path = content
                 temp_file_created = False
+                temp_file_path = None
                 
                 img = Image.open(content)
                 original_size = img.size
@@ -243,6 +244,7 @@ class GrammarCorrectionProcessor:
                     img.save(temp_path, 'JPEG', quality=85, optimize=True)
                     img.close()  # Free memory
                     content = temp_path
+                    temp_file_path = temp_path
                     temp_file_created = True
                 else:
                     img.close()  # Close even if not resized to free memory
@@ -251,9 +253,9 @@ class GrammarCorrectionProcessor:
                 extracted_texts = [item[1] for item in results]
                 
                 # Clean up temporary file if created
-                if temp_file_created and os.path.exists(content):
+                if temp_file_created and temp_file_path and os.path.exists(temp_file_path):
                     try:
-                        os.unlink(content)
+                        os.unlink(temp_file_path)
                     except OSError:
                         pass
                 
@@ -264,6 +266,15 @@ class GrammarCorrectionProcessor:
                 return extracted_texts, results
             except (OSError, ValueError, AttributeError) as e:
                 logger.error("Error during OCR: %s", e)
+                # Clean up temporary file if created (fix for resource leak)
+                if 'temp_file_path' in locals() and temp_file_path and os.path.exists(temp_file_path):
+                    try:
+                        os.unlink(temp_file_path)
+                    except OSError:
+                        pass
+                # Force garbage collection on error
+                import gc
+                gc.collect()
                 return [], []
 
         if input_type == 'html':
@@ -769,6 +780,7 @@ class GrammarCorrectionProcessor:
                 # Load the original image using the path
                 # Memory optimization: Load image efficiently
                 img = Image.open(original_content).convert("RGB")
+                original_size = img.size  # Store original size before resizing
                 
                 # Resize if too large to prevent memory issues
                 max_dimension = 2048
@@ -776,7 +788,7 @@ class GrammarCorrectionProcessor:
                     ratio = max_dimension / max(img.size)
                     new_size = (int(img.size[0] * ratio), int(img.size[1] * ratio))
                     img = img.resize(new_size, Image.Resampling.LANCZOS)
-                    logger.info("Resized image for reconstruction from %s to %s", Image.open(original_content).size, new_size)
+                    logger.info("Resized image for reconstruction from %s to %s", original_size, new_size)
                 
                 draw = ImageDraw.Draw(img)
 
