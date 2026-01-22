@@ -142,7 +142,8 @@ RUN /app/venv/bin/pip install --no-cache-dir --force-reinstall --constraint cons
 # Install remaining utilities
 RUN /app/venv/bin/pip install --no-cache-dir --constraint constraints.txt \
     "python-dotenv>=1.0.0,<2.0.0" \
-    "prometheus-client>=0.19.0,<1.0.0"
+    "prometheus-client>=0.19.0,<1.0.0" \
+    "pyspellchecker>=0.8.0,<1.0.0"
 
 # Final numpy, protobuf, and opencv version enforcement after all dependencies
 RUN /app/venv/bin/pip install --no-cache-dir --force-reinstall --constraint constraints.txt "numpy==1.26.4" && \
