@@ -195,6 +195,7 @@ USER appuser
 EXPOSE 8000
 ENV PORT=8000
 ENV MODEL_PATH=/app/model
+ENV MODEL_ID=dipak-bigdrops/grammar-correction-model
 
 # Health check (model is in image; no runtime download)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=5 \

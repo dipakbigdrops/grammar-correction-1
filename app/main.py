@@ -139,9 +139,14 @@ async def lifespan(app: FastAPI):
 
     model_path = _resolved_model_path()
     config_path = os.path.join(model_path, "config.json")
-    if getattr(settings, "MODEL_ID", None) and settings.MODEL_ID.strip() and not os.path.exists(config_path):
-        logger.info("Model not found at %s, downloading from Hugging Face (MODEL_ID set)", model_path)
+    model_id = (getattr(settings, "MODEL_ID", "") or "").strip()
+    if model_id and not os.path.exists(config_path):
+        logger.info("Model not found at %s, downloading from Hugging Face (%s) ...", model_path, model_id)
         await asyncio.to_thread(_download_model_at_startup)
+        if os.path.exists(config_path):
+            logger.info("Startup model download completed; model ready at %s", model_path)
+        else:
+            logger.warning("Startup model download may have failed; config.json still missing at %s", model_path)
 
     logger.info("Application started successfully")
 
