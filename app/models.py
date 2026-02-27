@@ -47,6 +47,7 @@ class TaskResponse(BaseModel):
         default=30,
         description="Estimated time to completion"
     )
+    result: Optional[Dict[str, Any]] = Field(default=None, description="Processing result when status is SUCCESS")
 
 
 class TaskStatusResponse(BaseModel):
@@ -75,7 +76,6 @@ class HealthResponse(BaseModel):
     """Health check response"""
     status: str
     version: str
-    redis_connected: bool
     grammar_model_loaded: bool
     ocr_available: bool
     beautifulsoup_available: bool

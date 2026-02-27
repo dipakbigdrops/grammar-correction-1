@@ -2,9 +2,11 @@
 Fixed Grammar Correction Processor
 All indentation and syntax errors resolved
 """
+import gc
 import os
 import json
 import re
+import threading
 import time
 import base64
 from io import BytesIO
@@ -32,7 +34,6 @@ class GrammarCorrectionProcessor:
         return cls._instance
 
     def __init__(self):
-        # Only initialize once (singleton pattern)
         if GrammarCorrectionProcessor._initialized:
             return
 
@@ -40,21 +41,63 @@ class GrammarCorrectionProcessor:
         self.tokenizer = None
         self.ocr_reader = None
         self.spell_checker = None
-        self._load_model()
+        self._last_used = 0.0
+        self._in_use_count = 0
+        self._lock = threading.Lock()
         self._initialize_ocr()
         self._initialize_spell_checker()
 
         GrammarCorrectionProcessor._initialized = True
-        logger.info(" GrammarCorrectionProcessor initialized (singleton)")
+        logger.info(" GrammarCorrectionProcessor initialized (singleton, model loads on first use)")
+
+    def ensure_loaded(self):
+        with self._lock:
+            self._in_use_count += 1
+            if self.model is None or self.tokenizer is None:
+                self._load_model()
+            self._last_used = time.time()
+
+    def release(self):
+        with self._lock:
+            if self._in_use_count > 0:
+                self._in_use_count -= 1
+            self._last_used = time.time()
+
+    def unload_model_if_idle(self):
+        timeout = getattr(settings, "MODEL_IDLE_UNLOAD_SECONDS", 300) or 300
+        with self._lock:
+            if self._in_use_count > 0:
+                return
+            if self.model is None:
+                return
+            if time.time() - self._last_used < timeout:
+                return
+            self.model = None
+            self.tokenizer = None
+        gc.collect()
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+        logger.info("Model unloaded (idle %ds); RAM freed", timeout)
 
     def _load_model(self):
         """Load model with ultimate robust error handling"""
         try:
-            # Check if model path exists or if we should download from Hugging Face
             model_path = settings.MODEL_PATH
-            model_id = getattr(settings, 'MODEL_ID', None)
-            
-            # If model path doesn't exist and MODEL_ID is set, download from Hugging Face
+            if not os.path.isabs(model_path):
+                if not os.path.exists(model_path):
+                    app_dir = os.path.dirname(os.path.abspath(__file__))
+                    project_root = os.path.dirname(app_dir)
+                    resolved = os.path.join(project_root, model_path.replace("\\", "/").lstrip("./"))
+                    if os.path.exists(resolved):
+                        model_path = os.path.abspath(resolved)
+                        logger.info("Resolved MODEL_PATH to %s", model_path)
+                else:
+                    model_path = os.path.abspath(model_path)
+            model_id = (getattr(settings, "MODEL_ID", "") or "").strip() or None
+
             if not os.path.exists(model_path) and model_id:
                 logger.info(" Model path not found: %s, downloading from Hugging Face: %s", model_path, model_id)
                 try:
@@ -158,7 +201,7 @@ class GrammarCorrectionProcessor:
     def _initialize_spell_checker(self):
         """Initialize spell checker for catching spelling errors"""
         try:
-            from spellchecker import SpellChecker  # pylint: disable=import-outside-toplevel
+            from spellchecker import SpellChecker  # type: ignore[import-untyped]
             self.spell_checker = SpellChecker(language='en')
             logger.info("Spell checker initialized")
         except (ImportError, Exception) as e:
@@ -377,12 +420,13 @@ class GrammarCorrectionProcessor:
 
             # Generate the corrected text (exactly like googlecolab.py)
             # CPU optimization: Use fewer beams and disable gradient computation
+            num_beams = getattr(settings, "MODEL_NUM_BEAMS", 5)
             with torch.no_grad():
                 generated_ids = self.model.generate(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
                     max_length=128,
-                    num_beams=3,  # Reduced from 5 to 3 for lower CPU usage
+                    num_beams=num_beams,
                     early_stopping=True,
                     do_sample=False,  # Disable sampling for deterministic, faster inference
                     num_return_sequences=1  # Only return one sequence
@@ -1160,14 +1204,14 @@ class GrammarCorrectionProcessor:
                 }
 
             if not text_to_correct:
-                        return {
-                            "success": True,
-                            "input_type": input_type,
-                            "original_text": "",
-                            "corrected_text": "",
-                            "corrections": [],
-                            "corrections_count": 0,
-                            "output_file": None,
+                return {
+                    "success": True,
+                    "input_type": input_type,
+                    "original_text": "",
+                    "corrected_text": "",
+                    "corrections": [],
+                    "corrections_count": 0,
+                    "output_file": None,
                     "processing_time_seconds": time.time() - start_time
                 }
 

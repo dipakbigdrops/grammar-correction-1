@@ -90,14 +90,12 @@ class CircuitBreakerMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         endpoint = f"{request.method}:{request.url.path}"
         
-        # Check if circuit is open
         if self.circuit_open[endpoint]:
-            # Check if timeout has passed
             if time.time() - self.last_failure_time[endpoint] > self.timeout:
                 logger.info("Circuit breaker: Attempting to close circuit for %s", endpoint)
                 self.circuit_open[endpoint] = False
                 self.failures[endpoint] = 0
-            if self.circuit_open[endpoint]:
+            else:
                 logger.warning("Circuit breaker: Circuit open for %s", endpoint)
                 raise HTTPException(
                     status_code=503,

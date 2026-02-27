@@ -114,14 +114,8 @@ RUN /app/venv/bin/pip install --no-cache-dir --constraint constraints.txt \
 RUN /app/venv/bin/pip install --no-cache-dir --constraint constraints.txt "beautifulsoup4>=4.12.0,<5.0.0" && \
     /app/venv/bin/pip install --no-cache-dir --constraint constraints.txt "lxml>=4.9.0,<5.0.0"
 
-# Install Redis (simple packages)
-RUN /app/venv/bin/pip install --no-cache-dir --constraint constraints.txt \
-    "redis>=4.6.0,<5.0.0" \
-    "fakeredis>=2.32.0,<3.0.0"
-
-# Install Celery and Flower (can be memory intensive)
-RUN /app/venv/bin/pip install --no-cache-dir --constraint constraints.txt "celery[redis]>=5.3.0,<6.0.0" && \
-    /app/venv/bin/pip install --no-cache-dir --constraint constraints.txt "flower>=2.0.0,<3.0.0"
+# Install in-memory cache (no Redis)
+RUN /app/venv/bin/pip install --no-cache-dir --constraint constraints.txt "fakeredis>=2.32.0,<3.0.0"
 
 # Install ML/transformers dependencies (after PyTorch and numpy)
 # Pin transformers to compatible version with PyTorch 2.2.0
@@ -160,19 +154,21 @@ RUN /app/venv/bin/python -c "import numpy; assert numpy.__version__ == '1.26.4',
 # Copy application code
 COPY . .
 
-# Download model from Hugging Face during deployment
-# This solves Git LFS issues by downloading model at build time instead of from Git
-# MODEL_ID should be set as environment variable in Render Dashboard
-# Render passes environment variables to Docker build, so we use ARG to capture them
-ARG MODEL_ID
-ARG HF_TOKEN
+# Download grammar model at build time (default repo; no build-arg required)
+ARG MODEL_ID=dipak-bigdrops/grammar-correction-model
+ARG HF_TOKEN=
 RUN mkdir -p ./model && \
-    echo "=== Model Download Debug ===" && \
-    echo "MODEL_ID ARG value: '${MODEL_ID:-not_set}'" && \
-    echo "HF_TOKEN ARG value: '${HF_TOKEN:-not_set}'" && \
-    /app/venv/bin/python -c "import os; model_id = '${MODEL_ID}' if '${MODEL_ID}' else None; token = '${HF_TOKEN}' if '${HF_TOKEN}' else None; print(f'Using MODEL_ID: {model_id}'); print(f'MODEL_ID is None: {model_id is None}'); print(f'MODEL_ID is empty: {model_id == \"\"}'); model_id = model_id.strip() if model_id and model_id != 'not_set' else None; from huggingface_hub import snapshot_download; (print(f'Downloading model: {model_id}') or snapshot_download(repo_id=model_id, local_dir='./model', token=token)) if model_id and model_id != 'not_set' else print('WARNING: MODEL_ID not set - model will not be downloaded. Set MODEL_ID as environment variable in Render Dashboard.')" && \
+    echo "=== Downloading grammar model: ${MODEL_ID} ===" && \
+    MODEL_ID="${MODEL_ID}" HF_TOKEN="${HF_TOKEN}" /app/venv/bin/python -c " \
+from huggingface_hub import snapshot_download; \
+import os; \
+model_id = (os.environ.get('MODEL_ID') or 'dipak-bigdrops/grammar-correction-model').strip(); \
+token = (os.environ.get('HF_TOKEN') or '').strip() or None; \
+snapshot_download(repo_id=model_id, local_dir='./model', token=token); \
+print('Model download complete') \
+" && \
     echo "=== Model Download Complete ===" && \
-    ls -lh ./model/ 2>/dev/null || echo "Note: Model directory listing unavailable"
+    ls -lh ./model/ 2>/dev/null || true
 
 # Pre-download EasyOCR models during build to prevent runtime downloads
 # This ensures models are cached in the Docker image and persist across requests
@@ -198,9 +194,10 @@ USER appuser
 # Expose port (supports PORT env var for Cloud Run, defaults to 8000)
 EXPOSE 8000
 ENV PORT=8000
+ENV MODEL_PATH=/app/model
 
-# Health check with extended start period for model loading
-HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
+# Health check (model is in image; no runtime download)
+HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=5 \
     CMD curl -f http://localhost:${PORT:-8000}/health || exit 1
 
 # Run the application (using virtual environment)

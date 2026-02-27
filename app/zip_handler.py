@@ -91,12 +91,24 @@ class ZipHandler:
                         break
                     
                     try:
-                        # Extract file
-                        extracted_path = zip_ref.extract(file_info, extract_dir)
-                        extracted_files.append(extracted_path)
+                        extract_dir_abs = os.path.abspath(extract_dir)
+                        target_path = os.path.normpath(os.path.join(extract_dir, filename))
+                        target_path_abs = os.path.abspath(target_path)
+                        try:
+                            if os.path.commonpath([target_path_abs, extract_dir_abs]) != extract_dir_abs or target_path_abs == extract_dir_abs:
+                                metadata["skipped_files"] += 1
+                                metadata["errors"].append(f"Rejected path escape: {filename}")
+                                continue
+                        except ValueError:
+                            metadata["skipped_files"] += 1
+                            metadata["errors"].append(f"Rejected path escape: {filename}")
+                            continue
+                        os.makedirs(os.path.dirname(target_path_abs), exist_ok=True)
+                        with open(target_path_abs, "wb") as f:
+                            f.write(zip_ref.read(file_info.filename))
+                        extracted_files.append(target_path_abs)
                         metadata["valid_files"] += 1
                         logger.info("Extracted: %s", filename)
-
                     except (OSError, zipfile.BadZipFile) as e:
                         logger.error("Error extracting %s: %s", filename, e)
                         metadata["errors"].append(f"Failed to extract {filename}: {str(e)}")

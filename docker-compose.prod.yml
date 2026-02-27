@@ -1,72 +1,15 @@
 version: '3.8'
 
-# Production Docker Compose Override
-# Usage: docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+# Production override: docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 
 services:
-  # Redis - Production Configuration
-  redis:
-    image: redis:7-alpine
-    container_name: grammar-redis-prod
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis-data-prod:/data
-    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD}
-    environment:
-      - REDIS_PASSWORD=${REDIS_PASSWORD}
-    healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - grammar-network-prod
-    restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: '0.5'
-        reservations:
-          memory: 256M
-          cpus: '0.1'
-
-  # FastAPI Application - Production Configuration
   api:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: grammar-api-prod
-    ports:
-      - "8000:8000"
     environment:
       - ENVIRONMENT=production
       - DEBUG=false
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - REDIS_PASSWORD=${REDIS_PASSWORD}
       - MODEL_PATH=/app/model
-      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS}
-      - API_WORKERS=4
-      - FLOWER_USER=${FLOWER_USER}
-      - FLOWER_PASSWORD=${FLOWER_PASSWORD}
-    volumes:
-      - ./model:/app/model:ro
-      - api-temp-prod:/tmp
-    depends_on:
-      redis:
-        condition: service_healthy
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
-    networks:
-      - grammar-network-prod
-    restart: unless-stopped
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-["*"]}
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
     deploy:
       resources:
         limits:
@@ -75,82 +18,3 @@ services:
         reservations:
           memory: 1G
           cpus: '0.5'
-
-  # Celery Worker - Production Configuration
-  worker:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: grammar-worker-prod
-    environment:
-      - ENVIRONMENT=production
-      - DEBUG=false
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - REDIS_PASSWORD=${REDIS_PASSWORD}
-      - MODEL_PATH=/app/model
-      - FLOWER_USER=${FLOWER_USER}
-      - FLOWER_PASSWORD=${FLOWER_PASSWORD}
-    volumes:
-      - ./model:/app/model:ro
-      - worker-temp-prod:/tmp
-    depends_on:
-      redis:
-        condition: service_healthy
-    command: celery -A app.celery_app worker --loglevel=info --concurrency=2 --max-tasks-per-child=1000
-    healthcheck:
-      test: ["CMD", "celery", "-A", "app.celery_app", "inspect", "ping"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-    networks:
-      - grammar-network-prod
-    restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          memory: 2G
-          cpus: '2.0'
-        reservations:
-          memory: 1G
-          cpus: '0.5'
-
-  # Flower - Production Configuration
-  flower:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: grammar-flower-prod
-    ports:
-      - "5555:5555"
-    environment:
-      - ENVIRONMENT=production
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - REDIS_PASSWORD=${REDIS_PASSWORD}
-      - FLOWER_USER=${FLOWER_USER}
-      - FLOWER_PASSWORD=${FLOWER_PASSWORD}
-    depends_on:
-      - redis
-      - worker
-    command: celery -A app.celery_app flower --port=5555 --basic_auth=${FLOWER_USER}:${FLOWER_PASSWORD}
-    networks:
-      - grammar-network-prod
-    restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: '0.5'
-        reservations:
-          memory: 256M
-          cpus: '0.1'
-
-volumes:
-  redis-data-prod:
-  api-temp-prod:
-  worker-temp-prod:
-
-networks:
-  grammar-network-prod:
-    driver: bridge

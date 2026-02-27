@@ -13,6 +13,7 @@ from pathlib import Path
 from app.config import settings as optimized_settings
 from app.cache_manager import get_cache_manager
 from app.processor import get_processor
+from app.utils import compute_file_hash
 from app.zip_handler import get_zip_handler
 
 logger = logging.getLogger(__name__)
@@ -70,27 +71,31 @@ class UniversalProcessor:
                     'cached': True,
                     'processing_time_seconds': 0
                 }
-            
-            # Process based on file type
-            if file_extension in optimized_settings.ALLOWED_ARCHIVE_EXTENSIONS:
-                result = self._process_zip_file(file_path, output_dir)
-                self.stats['zip_files'] += 1
-            else:
-                result = self._process_single_file(file_path, output_dir)
-                self.stats['single_files'] += 1
-            
-            # Update stats
-            self.stats['total_processed'] += 1
-            processing_time = time.time() - start_time
-            self.stats['processing_time'] += processing_time
-            result['processing_time_seconds'] = round(processing_time, 2)
-            
-            # Cache successful results
-            if result.get('success'):
-                self.cache_manager.set_file_cache(file_hash, result)
-            
-            return result
-            
+
+            loaded = False
+            try:
+                self.processor.ensure_loaded()
+                loaded = True
+                if file_extension in optimized_settings.ALLOWED_ARCHIVE_EXTENSIONS:
+                    result = self._process_zip_file(file_path, output_dir)
+                    self.stats['zip_files'] += 1
+                else:
+                    result = self._process_single_file(file_path, output_dir)
+                    self.stats['single_files'] += 1
+
+                self.stats['total_processed'] += 1
+                processing_time = time.time() - start_time
+                self.stats['processing_time'] += processing_time
+                result['processing_time_seconds'] = round(processing_time, 2)
+
+                if result.get('success'):
+                    self.cache_manager.set_file_cache(file_hash, result)
+
+                return result
+            finally:
+                if loaded:
+                    self.processor.release()
+
         except (OSError, IOError, RuntimeError) as e:
             logger.error("Error processing %s: %s", file_path, e, exc_info=True)
             return {
@@ -165,14 +170,12 @@ class UniversalProcessor:
             }
     
     def _compute_file_hash(self, file_path: str) -> str:
-        """Compute hash for caching"""
+        """Compute hash for caching (chunked read to avoid loading full file into memory)."""
         try:
-            import hashlib  # pylint: disable=import-outside-toplevel
-            with open(file_path, 'rb') as f:
-                return hashlib.sha256(f.read()).hexdigest()
+            return compute_file_hash(file_path)
         except (OSError, IOError) as e:
             logger.error("Error computing file hash: %s", e)
-            return str(time.time())  # Fallback to timestamp
+            return str(time.time())
     
     def get_performance_stats(self) -> Dict[str, Any]:
         """Get performance statistics"""

@@ -7,8 +7,6 @@ import json
 import logging
 from typing import Optional, Dict, Any, List
 
-import redis
-
 from app.config import settings as optimized_settings
 from app.utils import get_redis_client
 
@@ -56,7 +54,7 @@ class CacheManager:
             self.cache_stats['misses'] += 1
             logger.debug("Cache miss for %s", key)
             return None
-        except (redis.RedisError, json.JSONDecodeError) as e:
+        except (Exception, json.JSONDecodeError) as e:
             logger.error("Error getting cache %s: %s", key, e)
             return None
     
@@ -70,7 +68,7 @@ class CacheManager:
             self.redis_client.setex(key, ttl, json.dumps(value))
             logger.debug("Cached %s with TTL %d", key, ttl)
             return True
-        except (redis.RedisError, TypeError) as e:
+        except (Exception, TypeError) as e:
             logger.error("Error setting cache %s: %s", key, e)
             return False
     
@@ -187,7 +185,7 @@ class CacheManager:
                 self.redis_client.delete(*keys)
                 logger.info("Cleared %d cache entries for pattern %s", len(keys), pattern)
             return True
-        except redis.RedisError as e:
+        except Exception as e:
             logger.error("Error clearing cache: %s", e)
             return False
     
@@ -202,7 +200,7 @@ class CacheManager:
                 keys = self.redis_client.keys(f"{cache_type}:*")
                 sizes[cache_type] = len(keys)
             return sizes
-        except redis.RedisError as e:
+        except Exception as e:
             logger.error("Error getting cache size: %s", e)
             return {}
 

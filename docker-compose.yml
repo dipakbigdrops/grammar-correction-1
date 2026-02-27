@@ -1,24 +1,4 @@
-version: '3.8'
-
 services:
-  # Redis - Message Broker & Cache
-  redis:
-    image: redis:7-alpine
-    container_name: grammar-redis
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis-data:/data
-    command: redis-server --appendonly yes
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - grammar-network
-
-  # FastAPI Application
   api:
     build:
       context: .
@@ -27,75 +7,23 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
       - MODEL_PATH=/app/model
+      - MODEL_ID=dipak-bigdrops/grammar-correction-model
+      # - HF_TOKEN=   # set if using a private Hugging Face repo
     volumes:
-      - ./model:/app/model:ro
       - api-temp:/tmp
-    depends_on:
-      redis:
-        condition: service_healthy
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
-      retries: 3
-      start_period: 40s
-    networks:
-      - grammar-network
-    restart: unless-stopped
-
-  # Celery Worker
-  worker:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: grammar-worker
-    environment:
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - MODEL_PATH=/app/model
-    volumes:
-      - ./model:/app/model:ro
-      - worker-temp:/tmp
-    depends_on:
-      redis:
-        condition: service_healthy
-    command: celery -A app.celery_app worker --loglevel=info --concurrency=2
-    healthcheck:
-      test: ["CMD", "celery", "-A", "app.celery_app", "inspect", "ping"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-    networks:
-      - grammar-network
-    restart: unless-stopped
-
-  # Flower - Celery Monitoring
-  flower:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: grammar-flower
-    ports:
-      - "5555:5555"
-    environment:
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-    depends_on:
-      - redis
-      - worker
-    command: celery -A app.celery_app flower --port=5555
+      retries: 5
+      start_period: 90s
     networks:
       - grammar-network
     restart: unless-stopped
 
 volumes:
-  redis-data:
   api-temp:
-  worker-temp:
 
 networks:
   grammar-network:

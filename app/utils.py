@@ -5,58 +5,27 @@ import hashlib
 import json
 import logging
 import os
-import time
 from typing import Optional
-
-import redis
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Redis connection
-redis_client = None
+_memory_client = None
 
 
 def get_redis_client():
-    """Get Redis client instance - uses fakeredis as fallback if Redis unavailable"""
-    global redis_client
-    if redis_client is None:
-        # Skip Redis if host is explicitly set to skip or if host is localhost in production
-        if settings.REDIS_HOST.lower() in ('skip', 'none', 'false', ''):
-            logger.info("Redis disabled via configuration")
-            redis_client = None
-        else:
-            try:
-                # Try to connect to real Redis first
-                logger.info(f"Attempting to connect to Redis at {settings.REDIS_HOST}:{settings.REDIS_PORT}")
-                redis_client = redis.Redis(
-                    host=settings.REDIS_HOST,
-                    port=settings.REDIS_PORT,
-                    db=settings.REDIS_DB,
-                    password=settings.REDIS_PASSWORD if settings.REDIS_PASSWORD else None,
-                    decode_responses=True,
-                    socket_connect_timeout=5,  # Increased timeout for Render
-                    socket_timeout=5,  # Increased timeout for Render
-                    retry_on_timeout=True,
-                    health_check_interval=30
-                )
-                # Test connection
-                redis_client.ping()
-                logger.info(f"✅ Connected to Redis server successfully at {settings.REDIS_HOST}:{settings.REDIS_PORT}")
-            except (redis.ConnectionError, redis.TimeoutError, OSError, Exception) as e:
-                logger.warning(f"Real Redis not available at {settings.REDIS_HOST}:{settings.REDIS_PORT}: {e}")
-                logger.info("Falling back to FakeRedis (in-memory) - cache will be in-memory only")
-                try:
-                    # Fallback to fakeredis (in-memory Redis for development)
-                    import fakeredis  # pylint: disable=import-outside-toplevel
-                    redis_client = fakeredis.FakeStrictRedis(decode_responses=True)
-                    redis_client.ping()
-                    logger.info("✅ Using FakeRedis (in-memory) - perfect for development!")
-                except (ImportError, AttributeError) as fake_error:
-                    logger.error("Failed to initialize FakeRedis: %s", fake_error)
-                    redis_client = None
-    return redis_client
+    """Return in-memory cache client (FakeRedis). No Redis server required."""
+    global _memory_client
+    if _memory_client is None:
+        try:
+            import fakeredis
+            _memory_client = fakeredis.FakeStrictRedis(decode_responses=True)
+            logger.info("Using in-memory cache (no Redis)")
+        except ImportError as e:
+            logger.warning("FakeRedis not available: %s", e)
+            _memory_client = None
+    return _memory_client
 
 
 def compute_file_hash(file_path: str) -> str:
@@ -69,34 +38,34 @@ def compute_file_hash(file_path: str) -> str:
 
 
 def get_cached_result(file_hash: str) -> Optional[dict]:
-    """Get cached result from Redis"""
+    """Get cached result from in-memory cache"""
     if not settings.ENABLE_CACHING:
         return None
-    
+
     client = get_redis_client()
     if client is None:
         return None
-    
+
     try:
         cached = client.get(f"result:{file_hash}")
         if cached:
             logger.info("Cache hit for hash: %s", file_hash)
             return json.loads(cached)
-    except (redis.RedisError, json.JSONDecodeError) as e:
+    except (Exception, json.JSONDecodeError) as e:
         logger.error("Error getting cached result: %s", e)
 
     return None
 
 
 def set_cached_result(file_hash: str, result: dict):
-    """Cache result in Redis"""
+    """Cache result in memory"""
     if not settings.ENABLE_CACHING:
         return
-    
+
     client = get_redis_client()
     if client is None:
         return
-    
+
     try:
         client.setex(
             f"result:{file_hash}",
@@ -104,7 +73,7 @@ def set_cached_result(file_hash: str, result: dict):
             json.dumps(result)
         )
         logger.info("Cached result for hash: %s", file_hash)
-    except (redis.RedisError, TypeError) as e:
+    except (Exception, TypeError) as e:
         logger.error("Error caching result: %s", e)
 
 
@@ -115,69 +84,54 @@ def create_directories():
         "/tmp/outputs",
         "/tmp/cache"
     ]
-    
+
     for directory in directories:
         try:
             os.makedirs(directory, exist_ok=True)
-            logger.info("Created directory: %s", directory)
         except OSError as e:
-            logger.error("Error creating directory %s: %s", directory, e)
-
-def save_uploaded_file(file_content: bytes, filename: str, upload_dir: str = "/tmp/uploads") -> str:
-    """Save uploaded file and return path"""
-    os.makedirs(upload_dir, exist_ok=True)
-    
-    # Handle None or empty filename
-    if not filename:
-        filename = "unnamed_file"
-    
-    # Generate unique filename
-    file_hash = hashlib.md5(file_content).hexdigest()[:8]
-    base_name, ext = os.path.splitext(filename)
-    
-    # Limit base_name length to prevent filesystem issues
-    max_base_length = 200  # Leave room for hash and extension
-    if len(base_name) > max_base_length:
-        base_name = base_name[:max_base_length]
-    
-    # Sanitize filename to remove problematic characters
-    base_name = "".join(c for c in base_name if c.isalnum() or c in (' ', '-', '_', '.'))
-    base_name = base_name.strip()
-    
-    # If base_name is empty after sanitization, use a default
-    if not base_name:
-        base_name = "file"
-    
-    unique_filename = f"{base_name}_{file_hash}{ext}"
-    
-    file_path = os.path.join(upload_dir, unique_filename)
-    
-    with open(file_path, 'wb') as f:
-        f.write(file_content)
-    
-    logger.info("Saved uploaded file to: %s", file_path)
-    return file_path
+            logger.error("Failed to create directory %s: %s", directory, e)
 
 
-def cleanup_old_files(directory: str, max_age_seconds: int = 3600):
-    """Clean up old files from directory"""
-    if not os.path.exists(directory):
-        return
-    
-    current_time = time.time()
-    removed_count = 0
-    
-    for filename in os.listdir(directory):
-        file_path = os.path.join(directory, filename)
-        
-        if os.path.isfile(file_path):
-            file_age = current_time - os.path.getmtime(file_path)
-            if file_age > max_age_seconds:
+def save_uploaded_file(content: bytes, filename: str) -> str:
+    """Save uploaded file to temp directory and return path. Filename is sanitized to prevent path traversal."""
+    base_dir = os.path.abspath("/tmp/uploads")
+    safe_basename = os.path.basename(filename.replace("\\", "/").strip()) if filename else "unnamed"
+    if not safe_basename:
+        safe_basename = "unnamed"
+    file_path = os.path.join(base_dir, safe_basename)
+    real_path = os.path.abspath(file_path)
+    try:
+        if os.path.commonpath([real_path, base_dir]) != base_dir:
+            raise ValueError("Invalid filename: path would escape upload directory")
+    except ValueError:
+        raise ValueError("Invalid filename: path would escape upload directory")
+    with open(real_path, "wb") as f:
+        f.write(content)
+    return real_path
+
+
+def cleanup_old_files(directory: str, max_age_seconds: int):
+    """Remove files older than max_age_seconds from directory. Skips paths that resolve outside directory."""
+    import time
+    try:
+        base_abs = os.path.abspath(directory)
+        for name in os.listdir(directory):
+            path = os.path.join(directory, name)
+            try:
+                real_path = os.path.abspath(path)
+            except OSError:
+                continue
+            try:
+                if os.path.commonpath([real_path, base_abs]) != base_abs or real_path == base_abs:
+                    continue
+            except ValueError:
+                continue
+            if os.path.isfile(path):
                 try:
-                    os.remove(file_path)
-                    removed_count += 1
-                except OSError as e:
-                    logger.error("Error removing file %s: %s", file_path, e)
-
-    if removed_count > 0:
-        logger.info("Cleaned up %d old files from %s", removed_count, directory)
+                    if (time.time() - os.path.getmtime(path)) > max_age_seconds:
+                        os.remove(path)
+                        logger.debug("Removed old file: %s", path)
+                except OSError:
+                    pass
+    except OSError as e:
+        logger.debug("Cleanup skipped for %s: %s", directory, e)

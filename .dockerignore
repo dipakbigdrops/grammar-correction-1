@@ -26,9 +26,11 @@ wheels/
 *.egg
 
 # Virtual environments
+.venv/
 venv/
 env/
 ENV/
+download_model.py
 
 # IDE
 .vscode/
@@ -71,14 +73,5 @@ production.env
 *.tmp
 *.temp
 
-# Model files - downloaded from Hugging Face during build, not from repository
-# Exclude all model files - they will be downloaded during Docker build
-model/*.json
-model/*.bin
-model/*.safetensors
-model/*.model
-model/*.txt
-model/training_args.bin
-model/spiece.model
-# Keep model directory structure but exclude actual files
-!model/.gitkeep
+# Model dir - downloaded during Docker build, not from repo
+model/

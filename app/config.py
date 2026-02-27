@@ -21,33 +21,21 @@ class Settings(BaseSettings):
     API_PORT: int = 8000
     API_WORKERS: int = 4
     
-    # Redis Settings
-    REDIS_HOST: str = "localhost"  # Use "redis" for production, "localhost" for local development
-    REDIS_PORT: int = 6379
-    REDIS_DB: int = 0
-    REDIS_PASSWORD: str = ""  # Set via environment variable in production
-    
-    # Celery Settings (auto-generated from Redis settings if not provided)
-    CELERY_BROKER_URL: str = ""
-    CELERY_RESULT_BACKEND: str = ""
-    CELERY_TASK_TRACK_STARTED: bool = True
-    CELERY_TASK_TIME_LIMIT: int = 300  # 5 minutes
-    CELERY_TASK_SOFT_TIME_LIMIT: int = 240  # 4 minutes
-    
     # Model Settings
     MODEL_PATH: str = "./model"
     MODEL_ID: str = ""  # Hugging Face model ID (e.g., "dipak-bigdrops/grammar-correction-model")
     HF_TOKEN: str = ""  # Hugging Face token (optional, only needed for private models)
     MODEL_MAX_LENGTH: int = 128
     MODEL_NUM_BEAMS: int = 5
-    
+    MODEL_IDLE_UNLOAD_SECONDS: int = 300
+
     # OCR Settings
     OCR_LANGUAGES: list = ["en"]
     OCR_CONFIDENCE_THRESHOLD: float = 0.5
     OCR_MODEL_DIR: str = "/app/.EasyOCR/model"  # Persistent model directory in Docker image
     
     # Processing Settings
-    MAX_FILE_SIZE: int = 5 * 1024 * 1024  # 5MB (reduced for 2GB RAM plan)
+    MAX_FILE_SIZE: int = 20 * 1024 * 1024  # 20MB
     ALLOWED_IMAGE_EXTENSIONS: list = [".jpg", ".jpeg", ".png"]
     ALLOWED_HTML_EXTENSIONS: list = [".html", ".htm"]
     ALLOWED_ARCHIVE_EXTENSIONS: list = [".zip"]
@@ -55,15 +43,12 @@ class Settings(BaseSettings):
     MAX_FILES_IN_ZIP: int = 100  # Maximum files to process from ZIP
     CONTEXT_WORDS: int = 3
     
-    # Cache Settings
+    # Cache Settings (in-memory only)
     CACHE_TTL: int = 3600  # 1 hour
-    ENABLE_CACHING: bool = True  # Enabled - uses FakeRedis if real Redis unavailable
+    ENABLE_CACHING: bool = True
     
     # Monitoring Settings
     ENABLE_METRICS: bool = True
-    FLOWER_PORT: int = 5555
-    FLOWER_USER: str = "admin"
-    FLOWER_PASSWORD: str = ""
     
     # CORS Settings
     ALLOWED_ORIGINS: list = ["*"]
@@ -74,6 +59,10 @@ class Settings(BaseSettings):
     # Rate Limiting
     RATE_LIMIT_PER_MINUTE: int = 100
     RATE_LIMIT_BURST: int = 200
+
+    # Circuit Breaker
+    CIRCUIT_BREAKER_FAILURE_THRESHOLD: int = 5
+    CIRCUIT_BREAKER_TIMEOUT: int = 60
     
     # Autoscaling Thresholds
     MIN_REPLICAS: int = 3
@@ -147,17 +136,6 @@ class Settings(BaseSettings):
                     else:
                         # Split by comma and strip whitespace
                         setattr(self, field, [item.strip() for item in value.split(",") if item.strip()])
-        
-        # Auto-generate Celery URLs if not provided
-        if not self.CELERY_BROKER_URL or not self.CELERY_RESULT_BACKEND:
-            redis_auth = f":{self.REDIS_PASSWORD}@" if self.REDIS_PASSWORD else ""
-            redis_url = f"redis://{redis_auth}{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
-            
-            if not self.CELERY_BROKER_URL:
-                self.CELERY_BROKER_URL = redis_url
-            
-            if not self.CELERY_RESULT_BACKEND:
-                self.CELERY_RESULT_BACKEND = redis_url
         
         # Validate batch processing settings
         if self.MAX_FILES_IN_ZIP > 1000:

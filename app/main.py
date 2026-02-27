@@ -8,7 +8,7 @@ import hashlib
 import uuid
 import json
 from fastapi.middleware.cors import CORSMiddleware
-from celery.result import AsyncResult
+import asyncio
 import logging
 import os
 from typing import Optional, Dict, Any
@@ -23,7 +23,6 @@ from app.models import (
     TaskResponse, TaskStatusResponse, ProcessResult,
     HealthResponse, ErrorResponse, ProcessingStatus, InputType
 )
-from app.tasks import process_grammar_correction
 from app.utils import (
     get_redis_client, compute_file_hash, get_cached_result,
     set_cached_result, save_uploaded_file, cleanup_old_files
@@ -38,97 +37,131 @@ logger = logging.getLogger(__name__)
 
 # Helper functions for HTML preview storage in Redis
 def store_html_preview(preview_id: str, html_content: str, filename: str, ttl: int = 3600) -> bool:
-    """Store HTML preview in Redis with TTL"""
+    """Store HTML preview in memory with TTL"""
     try:
-        redis_client = get_redis_client()
-        if not redis_client:
-            logger.warning("Redis not available, HTML preview will not be stored")
+        client = get_redis_client()
+        if not client:
             return False
-        
         preview_data = {
             'html': html_content,
             'timestamp': time.time(),
             'filename': filename
         }
-        
         key = f"html_preview:{preview_id}"
-        redis_client.setex(key, ttl, json.dumps(preview_data))
-        logger.debug("Stored HTML preview %s in Redis with TTL %d", preview_id, ttl)
+        client.setex(key, ttl, json.dumps(preview_data))
+        logger.debug("Stored HTML preview %s with TTL %d", preview_id, ttl)
         return True
     except Exception as e:
-        logger.error("Error storing HTML preview in Redis: %s", e, exc_info=True)
+        logger.error("Error storing HTML preview: %s", e, exc_info=True)
         return False
 
 def get_html_preview_data(preview_id: str) -> Optional[Dict[str, Any]]:
-    """Retrieve HTML preview from Redis"""
+    """Retrieve HTML preview from memory"""
     try:
-        redis_client = get_redis_client()
-        if not redis_client:
+        client = get_redis_client()
+        if not client:
             return None
-        
         key = f"html_preview:{preview_id}"
-        cached_data = redis_client.get(key)
-        
+        cached_data = client.get(key)
         if cached_data:
             preview_data = json.loads(cached_data)
-            logger.debug("Retrieved HTML preview %s from Redis", preview_id)
+            logger.debug("Retrieved HTML preview %s", preview_id)
             return preview_data
         return None
     except Exception as e:
-        logger.error("Error retrieving HTML preview from Redis: %s", e, exc_info=True)
+        logger.error("Error retrieving HTML preview: %s", e, exc_info=True)
         return None
 
 def delete_html_preview(preview_id: str) -> bool:
-    """Delete HTML preview from Redis"""
+    """Delete HTML preview from memory"""
     try:
-        redis_client = get_redis_client()
-        if not redis_client:
+        client = get_redis_client()
+        if not client:
             return False
-        
         key = f"html_preview:{preview_id}"
-        redis_client.delete(key)
-        logger.debug("Deleted HTML preview %s from Redis", preview_id)
+        client.delete(key)
+        logger.debug("Deleted HTML preview %s", preview_id)
         return True
     except Exception as e:
-        logger.error("Error deleting HTML preview from Redis: %s", e, exc_info=True)
+        logger.error("Error deleting HTML preview: %s", e, exc_info=True)
         return False
 from app.processor import get_processor
 from app.universal_processor import get_universal_processor
 from app.cache_manager import get_cache_manager
 
-# HTML previews are now stored in Redis with 1-hour TTL
-# Helper functions for Redis-based preview storage
+# HTML previews stored in-memory with 1-hour TTL
+
+
+def _resolved_model_path() -> str:
+    """Return MODEL_PATH resolved to project root when relative (matches processor and health)."""
+    model_path = settings.MODEL_PATH
+    if not os.path.isabs(model_path):
+        if not os.path.exists(model_path):
+            _app_dir = os.path.dirname(os.path.abspath(__file__))
+            _project_root = os.path.dirname(_app_dir)
+            _resolved = os.path.join(_project_root, model_path.replace("\\", "/").lstrip("./"))
+            if os.path.exists(_resolved):
+                return os.path.abspath(_resolved)
+        return os.path.abspath(model_path)
+    return os.path.abspath(model_path)
+
+
+def _download_model_at_startup() -> None:
+    """Download grammar model from Hugging Face if MODEL_ID is set and model dir is empty."""
+    model_id = (getattr(settings, "MODEL_ID", "") or "").strip() or None
+    if not model_id:
+        return
+    model_path = _resolved_model_path()
+    if os.path.exists(os.path.join(model_path, "config.json")):
+        return
+    try:
+        from huggingface_hub import snapshot_download
+        hf_token = (getattr(settings, "HF_TOKEN", "") or "").strip() or None
+        os.makedirs(model_path, exist_ok=True)
+        logger.info("Downloading model from Hugging Face: %s into %s", model_id, model_path)
+        snapshot_download(repo_id=model_id, local_dir=model_path, token=hf_token)
+        logger.info("Model downloaded successfully")
+    except Exception as e:
+        logger.error("Startup model download failed: %s", e, exc_info=True)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager for startup and shutdown events"""
-    # Startup
     logger.info("Starting %s v%s", settings.APP_NAME, settings.APP_VERSION)
-    
-    # Test Redis connection
-    try:
-        redis_client = get_redis_client()
-        if redis_client:
-            logger.info("Redis connected successfully")
-        else:
-            logger.warning("Redis connection failed - caching disabled")
-    except (ConnectionError, OSError) as e:
-        logger.warning("Redis connection test failed: %s", e)
-    
-    # Create necessary directories
+
     try:
         os.makedirs("/tmp/uploads", exist_ok=True)
         os.makedirs("/tmp/outputs", exist_ok=True)
         logger.info("Created necessary directories")
     except OSError as e:
         logger.error("Failed to create directories: %s", e)
-    
+
+    model_path = _resolved_model_path()
+    config_path = os.path.join(model_path, "config.json")
+    if getattr(settings, "MODEL_ID", None) and settings.MODEL_ID.strip() and not os.path.exists(config_path):
+        logger.info("Model not found at %s, downloading from Hugging Face (MODEL_ID set)", model_path)
+        await asyncio.to_thread(_download_model_at_startup)
+
     logger.info("Application started successfully")
-    
+
+    async def _idle_unload_loop():
+        while True:
+            await asyncio.sleep(60)
+            try:
+                get_processor().unload_model_if_idle()
+            except Exception as e:
+                logger.debug("Idle unload check: %s", e)
+
+    _idle_task = asyncio.create_task(_idle_unload_loop())
+
     yield
-    
-    # Shutdown
+
+    _idle_task.cancel()
+    try:
+        await _idle_task
+    except asyncio.CancelledError:
+        pass
     logger.info("Shutting down application")
 
 
@@ -153,8 +186,16 @@ app.add_middleware(
 
 # Add custom middleware for production
 app.add_middleware(RequestTrackingMiddleware)
-app.add_middleware(CircuitBreakerMiddleware, failure_threshold=5, timeout=60)
-app.add_middleware(RateLimitMiddleware, requests_per_minute=1000, burst=2000)
+app.add_middleware(
+    CircuitBreakerMiddleware,
+    failure_threshold=settings.CIRCUIT_BREAKER_FAILURE_THRESHOLD,
+    timeout=settings.CIRCUIT_BREAKER_TIMEOUT
+)
+app.add_middleware(
+    RateLimitMiddleware,
+    requests_per_minute=settings.RATE_LIMIT_PER_MINUTE,
+    burst=settings.RATE_LIMIT_BURST
+)
 
 
 @app.get("/", tags=["Root"])
@@ -171,15 +212,6 @@ async def root():
 @app.get("/health", response_model=HealthResponse, tags=["Health"])
 async def health_check():
     """Health check endpoint"""
-    redis_connected = False
-    try:
-        client = get_redis_client()
-        if client:
-            client.ping()
-            redis_connected = True
-    except (ConnectionError, AttributeError) as e:
-        logger.debug("Redis health check failed: %s", e)
-    
     # Check if processor can be initialized
     model_loaded = False
     ocr_available = False
@@ -188,8 +220,18 @@ async def health_check():
     html_reconstruction_available = False
     
     try:
-        # Check if model path exists and is valid
-        model_loaded = os.path.exists(settings.MODEL_PATH) and os.path.exists(os.path.join(settings.MODEL_PATH, "config.json"))
+        model_dir = _resolved_model_path()
+        config_path = os.path.join(model_dir, "config.json")
+        if os.path.exists(model_dir) and os.path.exists(config_path):
+            try:
+                files = os.listdir(model_dir)
+                model_loaded = "config.json" in files and any(
+                    f.endswith((".bin", ".safetensors")) for f in files
+                )
+            except OSError:
+                model_loaded = False
+        else:
+            model_loaded = False
         
         # Check OCR availability
         try:
@@ -244,9 +286,8 @@ async def health_check():
         logger.debug("Model/OCR health check failed: %s", e)
     
     return HealthResponse(
-        status="healthy" if redis_connected and model_loaded else "degraded",
+        status="healthy" if model_loaded else "degraded",
         version=settings.APP_VERSION,
-        redis_connected=redis_connected,
         grammar_model_loaded=model_loaded,
         ocr_available=ocr_available,
         beautifulsoup_available=beautifulsoup_available,
@@ -346,140 +387,83 @@ async def process_file(
         
         # Save uploaded file
         file_path = save_uploaded_file(file_content, original_filename)
-        
-        # Schedule cleanup
         background_tasks.add_task(cleanup_old_files, "/tmp/uploads", 3600)
         background_tasks.add_task(cleanup_old_files, "/tmp/outputs", 3600)
-        
-        # Use universal processor for all input types
-        logger.info("Processing %s with universal processor (async_processing=%s ignored)", original_filename, async_processing)
-        
-        universal_processor = get_universal_processor()
-        result = universal_processor.process_any_input(file_path, output_dir="/tmp/outputs")
-        
-        # Add performance stats to response
-        stats = universal_processor.get_performance_stats()
-        result['performance_stats'] = stats
-        
-        # If format is html and input is HTML, return HTML directly (not escaped in JSON)
-        if format and format.lower() == "html":
-            # Check if this is HTML input
-            input_type = result.get('input_type')
-            if input_type == 'html' and result.get('success'):
-                output_content = result.get('output_content')
-                if output_content and isinstance(output_content, str):
-                    # Generate preview ID for later retrieval
-                    preview_id = str(uuid.uuid4())
-                    
-                    # Store HTML preview in Redis with 1-hour TTL
-                    store_html_preview(preview_id, output_content, original_filename, ttl=3600)
-                    
-                    # Return as HTML with proper content type and preview ID header
-                    response = HTMLResponse(
-                        content=output_content,
-                        status_code=200,
-                        media_type="text/html"
-                    )
-                    response.headers["X-Preview-ID"] = preview_id
-                    return response
-            else:
-                # If format=html but input is not HTML, return error
+
+        try:
+            logger.info("Processing %s with universal processor (async_processing=%s ignored)", original_filename, async_processing)
+            universal_processor = get_universal_processor()
+            result = universal_processor.process_any_input(file_path, output_dir="/tmp/outputs")
+
+            stats = universal_processor.get_performance_stats()
+            result['performance_stats'] = stats
+
+            if format and format.lower() == "html":
+                input_type = result.get('input_type')
+                if input_type == 'html' and result.get('success'):
+                    output_content = result.get('output_content')
+                    if output_content and isinstance(output_content, str):
+                        preview_id = str(uuid.uuid4())
+                        store_html_preview(preview_id, output_content, original_filename, ttl=3600)
+                        response = HTMLResponse(
+                            content=output_content,
+                            status_code=200,
+                            media_type="text/html"
+                        )
+                        response.headers["X-Preview-ID"] = preview_id
+                        return response
                 raise HTTPException(
                     status_code=400,
                     detail=f"format=html is only available for HTML input files. Current input type: {input_type}"
                 )
-        
-        return JSONResponse(content={
-            "task_id": "universal",
-            "status": "SUCCESS" if result.get('success') else "FAILURE",
-            "message": "Processing completed with universal processor",
-            "result": result,
-            "estimated_completion_seconds": result.get('processing_time_seconds', 0)
-        })
-    
+
+            return JSONResponse(content={
+                "task_id": "universal",
+                "status": "SUCCESS" if result.get('success') else "FAILURE",
+                "message": "Processing completed with universal processor",
+                "result": result,
+                "estimated_completion_seconds": result.get('processing_time_seconds', 0)
+            })
+        except HTTPException:
+            raise
+        finally:
+            try:
+                if file_path and os.path.isfile(file_path):
+                    os.remove(file_path)
+            except OSError:
+                pass
+
     except HTTPException:
         raise
-    except (OSError, RuntimeError, ValueError) as e:
+    except ValueError as e:
+        logger.error("Error processing file: %s", e, exc_info=True)
+        raise HTTPException(status_code=400, detail=str(e))
+    except (OSError, RuntimeError, ImportError, AttributeError) as e:
         logger.error("Error processing file: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        logger.error("Error processing file: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/task/{task_id}", response_model=TaskStatusResponse, tags=["Tasks"])
 async def get_task_status(task_id: str):
     """
-    Get status of a processing task
-    
-    - **task_id**: Task ID returned from /process endpoint
+    Get status of a processing task. Realtime mode: use /process for synchronous results.
     """
-    try:
-        # Handle special task IDs
-        if task_id == "sync" or task_id == "cached":
-            return TaskStatusResponse(
-                task_id=task_id,
-                status=ProcessingStatus.SUCCESS,
-                progress=100,
-                result={"message": "Task completed"}
-            )
-        
-        # Try to get task result
-        try:
-            task_result = AsyncResult(task_id)
-            
-            if task_result.state == 'PENDING':
-                response = TaskStatusResponse(
-                    task_id=task_id,
-                    status=ProcessingStatus.PENDING,
-                    progress=0
-                )
-            elif task_result.state == 'STARTED':
-                progress = task_result.info.get('progress', 50) if isinstance(task_result.info, dict) else 50
-                response = TaskStatusResponse(
-                    task_id=task_id,
-                    status=ProcessingStatus.STARTED,
-                    progress=progress
-                )
-            elif task_result.state == 'SUCCESS':
-                result = task_result.result
-                response = TaskStatusResponse(
-                    task_id=task_id,
-                    status=ProcessingStatus.SUCCESS,
-                    progress=100,
-                    result=result
-                )
-            elif task_result.state == 'FAILURE':
-                response = TaskStatusResponse(
-                    task_id=task_id,
-                    status=ProcessingStatus.FAILURE,
-                    progress=0,
-                    error=str(task_result.info)
-                )
-            else:
-                response = TaskStatusResponse(
-                    task_id=task_id,
-                    status=ProcessingStatus.PENDING,
-                    progress=0
-                )
-            
-            return response
-        except AttributeError:
-            # Celery backend not configured - return pending status
-            logger.warning("Celery backend not configured, returning pending status for task %s", task_id)
-            return TaskStatusResponse(
-                task_id=task_id,
-                status=ProcessingStatus.PENDING,
-                progress=0,
-                result={"message": "Task status unavailable - Celery backend not configured"}
-            )
-    
-    except (AttributeError, ValueError) as e:
-        logger.error("Error getting task status: %s", e)
-        # Return a valid response instead of raising exception
+    if task_id == "universal" or task_id == "sync" or task_id == "cached":
         return TaskStatusResponse(
             task_id=task_id,
-            status=ProcessingStatus.PENDING,
-            progress=0,
-            result={"error": "Task status unavailable"}
+            status=ProcessingStatus.SUCCESS,
+            progress=100,
+            result={"message": "Realtime processing - results returned from /process"}
         )
+    return TaskStatusResponse(
+        task_id=task_id,
+        status=ProcessingStatus.PENDING,
+        progress=0,
+        result={"message": "Realtime only - use POST /process for synchronous processing"}
+    )
 
 
 @app.get("/download/{filename}", tags=["Output"])
@@ -553,7 +537,7 @@ async def get_html_preview(preview_id: str):
     
     - **preview_id**: Preview ID from X-Preview-ID header (returned when format=html)
     """
-    # Retrieve preview from Redis
+    # Retrieve preview from memory
     preview_data = get_html_preview_data(preview_id)
     
     if not preview_data:
@@ -593,33 +577,11 @@ async def metrics():
         cache_manager = get_cache_manager()
         cache_stats = cache_manager.get_cache_stats()
         
-        # Try to get Celery stats
-        try:
-            from app.celery_app import celery_app
-            celery_stats = celery_app.control.inspect().stats()
-            active_tasks = celery_app.control.inspect().active()
-            
-            return {
-                "status": "operational",
-                "processor_stats": processor_stats,
-                "cache_stats": cache_stats,
-                "celery_stats": {
-                    "workers": celery_stats,
-                    "active_tasks": active_tasks
-                }
-            }
-        except (AttributeError, ConnectionError) as celery_error:
-            logger.warning("Celery metrics unavailable: %s", celery_error)
-            return {
-                "status": "operational",
-                "processor_stats": processor_stats,
-                "cache_stats": cache_stats,
-                "celery_stats": {
-                    "workers": "unavailable",
-                    "active_tasks": "unavailable",
-                    "message": "Celery backend not configured"
-                }
-            }
+        return {
+            "status": "operational",
+            "processor_stats": processor_stats,
+            "cache_stats": cache_stats
+        }
     except (OSError, AttributeError) as e:
         logger.error("Error getting metrics: %s", e)
         return {
