@@ -52,7 +52,7 @@ class Settings(BaseSettings):
     
     # CORS Settings
     ALLOWED_ORIGINS: list = ["*"]
-    CORS_ALLOW_CREDENTIALS: bool = True
+    CORS_ALLOW_CREDENTIALS: bool = False
     CORS_ALLOW_METHODS: list = ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
     CORS_ALLOW_HEADERS: list = ["*"]
     
