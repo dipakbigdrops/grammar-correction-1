@@ -50,27 +50,7 @@ class UniversalProcessor:
         start_time = time.time()
         
         try:
-            # Determine input type
             file_extension = os.path.splitext(file_path)[1].lower()
-            
-            # Check cache first (universal caching)
-            file_hash = self._compute_file_hash(file_path)
-            cached_result = None
-            try:
-                cached_result = self.cache_manager.get_file_cache(file_hash)
-            except (KeyError, AttributeError, Exception) as e:
-                # If cache lookup fails, log and continue without cache
-                logger.warning("Cache lookup failed for %s: %s. Continuing without cache.", 
-                             os.path.basename(file_path), e)
-            
-            if cached_result:
-                self.stats['cache_hits'] += 1
-                logger.info("Cache hit for %s", os.path.basename(file_path))
-                return {
-                    **cached_result,
-                    'cached': True,
-                    'processing_time_seconds': 0
-                }
 
             loaded = False
             try:
@@ -87,9 +67,6 @@ class UniversalProcessor:
                 processing_time = time.time() - start_time
                 self.stats['processing_time'] += processing_time
                 result['processing_time_seconds'] = round(processing_time, 2)
-
-                if result.get('success'):
-                    self.cache_manager.set_file_cache(file_hash, result)
 
                 return result
             finally:

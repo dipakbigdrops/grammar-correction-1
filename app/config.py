@@ -49,9 +49,9 @@ class Settings(BaseSettings):
     MAX_FILES_IN_ZIP: int = 100  # Maximum files to process from ZIP
     CONTEXT_WORDS: int = 3
     
-    # Cache Settings (in-memory only; lower TTL reduces memory use)
-    CACHE_TTL: int = 300  # 5 minutes
-    ENABLE_CACHING: bool = True
+    # Cache Settings — disabled; all requests are processed in real time
+    CACHE_TTL: int = 0
+    ENABLE_CACHING: bool = False
     
     # Monitoring Settings
     ENABLE_METRICS: bool = True
