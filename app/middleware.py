@@ -33,12 +33,13 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         current_time = time.time()
         minute_ago = current_time - 60
         
-        # Clean old requests
-        self.requests[client_ip] = [
-            req_time for req_time in self.requests[client_ip]
-            if req_time > minute_ago
-        ]
-        
+        # Clean old timestamps for this IP; drop the key entirely if empty
+        cleaned = [t for t in self.requests[client_ip] if t > minute_ago]
+        if cleaned:
+            self.requests[client_ip] = cleaned
+        else:
+            self.requests.pop(client_ip, None)
+
         # Check rate limit
         if len(self.requests[client_ip]) >= self.requests_per_minute:
             logger.warning("Rate limit exceeded for %s", client_ip)
@@ -131,25 +132,31 @@ class CircuitBreakerMiddleware(BaseHTTPMiddleware):
             )
 
 
+_MAX_DURATION_SAMPLES = 500  # cap per endpoint to prevent unbounded growth
+
+
 class RequestTrackingMiddleware(BaseHTTPMiddleware):
     """Track request metrics for monitoring"""
-    
+
     def __init__(self, app):
         super().__init__(app)
         self.request_count = defaultdict(int)
-        self.request_duration = defaultdict(list)
-    
+        self.request_duration: dict = defaultdict(list)
+
     async def dispatch(self, request: Request, call_next):
         start_time = time.time()
-        
+
         try:
             response = await call_next(request)
             duration = time.time() - start_time
-            
-            # Track metrics
+
             endpoint = f"{request.method}:{request.url.path}"
             self.request_count[endpoint] += 1
-            self.request_duration[endpoint].append(duration)
+            samples = self.request_duration[endpoint]
+            samples.append(duration)
+            # Keep only the most recent N samples to prevent unbounded growth
+            if len(samples) > _MAX_DURATION_SAMPLES:
+                del samples[:-_MAX_DURATION_SAMPLES]
             
             # Add timing header
             response.headers["X-Process-Time"] = f"{duration:.3f}s"

@@ -208,7 +208,13 @@ class ZipHandler:
                 }
 
 
+_zip_handler: ZipHandler = None
+
+
 def get_zip_handler() -> ZipHandler:
-    """Get or create ZIP handler instance"""
-    return ZipHandler()
+    """Get or create singleton ZIP handler instance"""
+    global _zip_handler
+    if _zip_handler is None:
+        _zip_handler = ZipHandler()
+    return _zip_handler
 

@@ -2,6 +2,12 @@
 FastAPI Application
 Main API endpoints and application setup
 """
+import os
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+
 from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks, Form, Query
 from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
 import hashlib
@@ -10,7 +16,6 @@ import json
 from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 import logging
-import os
 from typing import Optional, Dict, Any
 import time
 from contextlib import asynccontextmanager
@@ -25,7 +30,8 @@ from app.models import (
 )
 from app.utils import (
     get_redis_client, compute_file_hash, get_cached_result,
-    set_cached_result, save_uploaded_file, cleanup_old_files
+    set_cached_result, save_uploaded_file, cleanup_old_files,
+    get_upload_dir, get_output_dir
 )
 
 # Configure logging
@@ -125,14 +131,22 @@ def _download_model_at_startup() -> None:
         logger.error("Startup model download failed: %s", e, exc_info=True)
 
 
+_processing_semaphore: asyncio.Semaphore = None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager for startup and shutdown events"""
-    logger.info("Starting %s v%s", settings.APP_NAME, settings.APP_VERSION)
+    global _processing_semaphore
+    _processing_semaphore = asyncio.Semaphore(settings.MAX_CONCURRENT_REQUESTS)
+    logger.info(
+        "Starting %s v%s (max concurrent requests: %d)",
+        settings.APP_NAME, settings.APP_VERSION, settings.MAX_CONCURRENT_REQUESTS
+    )
 
     try:
-        os.makedirs("/tmp/uploads", exist_ok=True)
-        os.makedirs("/tmp/outputs", exist_ok=True)
+        os.makedirs(get_upload_dir(), exist_ok=True)
+        os.makedirs(get_output_dir(), exist_ok=True)
         logger.info("Created necessary directories")
     except OSError as e:
         logger.error("Failed to create directories: %s", e)
@@ -154,7 +168,9 @@ async def lifespan(app: FastAPI):
         while True:
             await asyncio.sleep(60)
             try:
-                get_processor().unload_model_if_idle()
+                p = get_processor()
+                p.unload_model_if_idle()
+                p.unload_ocr_if_idle()
             except Exception as e:
                 logger.debug("Idle unload check: %s", e)
 
@@ -360,8 +376,8 @@ async def process_file(
     async_processing: bool = Form(default=True),
     format: Optional[str] = Query(default="json", description="Response format: 'json' or 'html' (for HTML input only)")
 ):
+    file_path = None
     try:
-        # Store filename before reading (file object may become unavailable)
         original_filename = file.filename
         if not original_filename:
             original_filename = "unnamed_file"
@@ -392,13 +408,30 @@ async def process_file(
         
         # Save uploaded file
         file_path = save_uploaded_file(file_content, original_filename)
-        background_tasks.add_task(cleanup_old_files, "/tmp/uploads", 3600)
-        background_tasks.add_task(cleanup_old_files, "/tmp/outputs", 3600)
+        background_tasks.add_task(cleanup_old_files, get_upload_dir(), 3600)
+        background_tasks.add_task(cleanup_old_files, get_output_dir(), 3600)
 
         try:
-            logger.info("Processing %s with universal processor (async_processing=%s ignored)", original_filename, async_processing)
+            # Acquire a processing slot. On a 1-vCPU server MAX_CONCURRENT_REQUESTS=1
+            # so inference is always sequential — no concurrent model calls, no CPU fight.
+            # We wait up to 5 s for a free slot; after that we return 503 immediately
+            # so clients know to retry rather than waiting indefinitely.
+            try:
+                await asyncio.wait_for(_processing_semaphore.acquire(), timeout=5.0)
+            except asyncio.TimeoutError:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Server is busy processing another request. Please retry in a moment."
+                )
+
+            logger.info("Processing %s with universal processor", original_filename)
             universal_processor = get_universal_processor()
-            result = universal_processor.process_any_input(file_path, output_dir="/tmp/outputs")
+            try:
+                result = await asyncio.to_thread(
+                    universal_processor.process_any_input, file_path, get_output_dir()
+                )
+            finally:
+                _processing_semaphore.release()
 
             stats = universal_processor.get_performance_stats()
             result['performance_stats'] = stats
@@ -481,10 +514,9 @@ async def download_file(filename: str):
     # Sanitize filename to prevent path traversal attacks
     filename = os.path.basename(filename)
     
-    file_path = os.path.join("/tmp/outputs", filename)
-    
-    # Additional security check: ensure file is within the outputs directory
-    if not os.path.abspath(file_path).startswith(os.path.abspath("/tmp/outputs")):
+    output_dir = get_output_dir()
+    file_path = os.path.join(output_dir, filename)
+    if not os.path.abspath(file_path).startswith(os.path.abspath(output_dir)):
         raise HTTPException(status_code=400, detail="Invalid file path")
     
     if not os.path.exists(file_path):

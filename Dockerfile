@@ -1,6 +1,5 @@
 FROM python:3.11-slim
 
-# Set environment variables
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
@@ -8,7 +7,8 @@ ENV PYTHONUNBUFFERED=1 \
     OMP_NUM_THREADS=1 \
     MKL_NUM_THREADS=1 \
     NUMEXPR_NUM_THREADS=1 \
-    OPENBLAS_NUM_THREADS=1
+    OPENBLAS_NUM_THREADS=1 \
+    MALLOC_ARENA_MAX=2
 
 # Install system dependencies for ML libraries and image processing
 RUN apt-get update && apt-get install -y \
@@ -154,11 +154,13 @@ RUN /app/venv/bin/python -c "import numpy; assert numpy.__version__ == '1.26.4',
 # Copy application code
 COPY . .
 
-# Download grammar model at build time (default repo; no build-arg required)
+# Download grammar model at build time (default repo is public; no token required)
+# For a private HF repo: docker build --secret id=HF_TOKEN,env=HF_TOKEN -t grammar-api .
 ARG MODEL_ID=dipak-bigdrops/grammar-correction-model
-ARG HF_TOKEN=
-RUN mkdir -p ./model && \
+RUN --mount=type=secret,id=HF_TOKEN,required=false \
+    mkdir -p ./model && \
     echo "=== Downloading grammar model: ${MODEL_ID} ===" && \
+    export HF_TOKEN= && [ -f /run/secrets/HF_TOKEN ] && export HF_TOKEN="$(cat /run/secrets/HF_TOKEN)" ; \
     MODEL_ID="${MODEL_ID}" HF_TOKEN="${HF_TOKEN}" /app/venv/bin/python -c " \
 from huggingface_hub import snapshot_download; \
 import os; \
@@ -201,7 +203,5 @@ ENV MODEL_ID=dipak-bigdrops/grammar-correction-model
 HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=5 \
     CMD curl -f http://localhost:${PORT:-8000}/health || exit 1
 
-# Run the application (using virtual environment)
-# Verify NumPy version at runtime before starting
-# Use single worker for 2GB RAM plan to prevent OOM kills
-CMD ["sh", "-c", "/app/venv/bin/python -c \"import numpy; assert numpy.__version__.startswith('1.26'), f'CRITICAL: NumPy version {numpy.__version__} is incompatible! Expected 1.26.x'; print(f'✓ Runtime NumPy check: {numpy.__version__}')\" && /app/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1"]
+# Run: use --cpus=2 --memory=4g so the container is not killed (OOM or CPU throttling).
+CMD ["sh", "-c", "/app/venv/bin/python -c \"import numpy; assert numpy.__version__.startswith('1.26'), f'CRITICAL: NumPy version {numpy.__version__} is incompatible! Expected 1.26.x'; print(f'Runtime NumPy check: {numpy.__version__}')\" && /app/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1"]

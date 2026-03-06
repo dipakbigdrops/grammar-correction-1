@@ -355,25 +355,15 @@ def _test_model_inference(model, tokenizer) -> bool:
 
 def test_model_inference(model, tokenizer, text: str) -> str:
     """
-    Test model inference with error handling.
-    Uses parameters matching googlecolab.py for consistency.
+    Test model inference with error handling. Uses CPU and num_beams=1 to minimize memory.
     """
     try:
         if model is None or tokenizer is None:
-            return text  # Return original text if model not available
-        
-        # Prepare input - do NOT add prefix here, it should be in training data
-        # If your model was trained with "correct grammar:" prefix, uncomment the line below
-        # prefixed_text = f"correct grammar: {text}"
-        prefixed_text = text
-        
-        # Get device
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            return text
+        device = torch.device("cpu")
         model.to(device)
-        
-        # Tokenize the input text (matching googlecolab.py)
         inputs = tokenizer(
-            prefixed_text,
+            text,
             return_tensors="pt",
             padding=True,
             truncation=True,
@@ -381,32 +371,22 @@ def test_model_inference(model, tokenizer, text: str) -> str:
         )
         input_ids = inputs['input_ids'].to(device)
         attention_mask = inputs['attention_mask'].to(device)
-        
-        # Generate the corrected text (matching googlecolab.py parameters)
         with torch.no_grad():
             generated_ids = model.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 max_length=128,
-                num_beams=5,  # Beam search for better quality
-                early_stopping=True
+                num_beams=1,
+                do_sample=False,
             )
-        
-        # Decode the generated IDs to text
         corrected_text = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
-        
-        # If result is empty, it's a model failure - return original text
-        # Note: If corrected_text == text, that's VALID (no errors found), not a failure
         if not corrected_text or corrected_text.strip() == "":
             logger.warning("Model returned empty result (failure), returning original text")
             return text
-        
-        # Model succeeded - return corrected text (may be same as input if no errors)
         return corrected_text
-        
     except (RuntimeError, AttributeError, ValueError, OSError) as e:
         logger.error("Model inference failed: %s", e)
-        return text  # Return original text on error
+        return text
 
 
 def get_model_info(model_path: str) -> dict:

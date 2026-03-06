@@ -16,10 +16,171 @@ from typing import Tuple, List, Dict, Optional, Any
 import logging
 import torch
 
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+torch.set_num_threads(1)
+torch.set_num_interop_threads(1)
+
 from app.config import settings
 from app.robust_model_loader import load_robust_model, test_model_inference
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Pre-compiled patterns (compiled once at import time, reused per request)
+# ---------------------------------------------------------------------------
+_NORMALIZE_PATTERNS: List[Tuple[re.Pattern, str]] = [
+    # Transpositions / short OCR swaps
+    (re.compile(r'\bteh\b', re.IGNORECASE), 'the'),
+    (re.compile(r'\badn\b', re.IGNORECASE), 'and'),
+    (re.compile(r'\btaht\b', re.IGNORECASE), 'that'),
+    (re.compile(r'\bwihch\b', re.IGNORECASE), 'which'),
+    # Common misspellings the model may not catch
+    (re.compile(r'\bgrammer\b', re.IGNORECASE), 'grammar'),
+    (re.compile(r'\brecieve\b', re.IGNORECASE), 'receive'),
+    (re.compile(r'\boccured\b', re.IGNORECASE), 'occurred'),
+    (re.compile(r'\bseperate\b', re.IGNORECASE), 'separate'),
+    (re.compile(r'\bdefinately\b', re.IGNORECASE), 'definitely'),
+    (re.compile(r'\bdefinatly\b', re.IGNORECASE), 'definitely'),
+    (re.compile(r'\bcorection\b', re.IGNORECASE), 'correction'),
+    (re.compile(r'\bneccessary\b', re.IGNORECASE), 'necessary'),
+    (re.compile(r'\bnecesary\b', re.IGNORECASE), 'necessary'),
+    (re.compile(r'\baccomodate\b', re.IGNORECASE), 'accommodate'),
+    (re.compile(r'\brecomend\b', re.IGNORECASE), 'recommend'),
+    (re.compile(r'\breccomend\b', re.IGNORECASE), 'recommend'),
+    (re.compile(r'\bthier\b', re.IGNORECASE), 'their'),
+    (re.compile(r'\bwierd\b', re.IGNORECASE), 'weird'),
+    (re.compile(r'\bbeleive\b', re.IGNORECASE), 'believe'),
+    (re.compile(r'\bbelive\b', re.IGNORECASE), 'believe'),
+    (re.compile(r'\bgoverment\b', re.IGNORECASE), 'government'),
+    (re.compile(r'\bgovernement\b', re.IGNORECASE), 'government'),
+    (re.compile(r'\bexistance\b', re.IGNORECASE), 'existence'),
+    (re.compile(r'\bwritting\b', re.IGNORECASE), 'writing'),
+    (re.compile(r'\buntill\b', re.IGNORECASE), 'until'),
+    (re.compile(r'\btruely\b', re.IGNORECASE), 'truly'),
+    (re.compile(r'\bfourty\b', re.IGNORECASE), 'forty'),
+    (re.compile(r'\bpriveledge\b', re.IGNORECASE), 'privilege'),
+    (re.compile(r'\bprivlege\b', re.IGNORECASE), 'privilege'),
+    (re.compile(r'\bhieght\b', re.IGNORECASE), 'height'),
+    (re.compile(r'\bheigth\b', re.IGNORECASE), 'height'),
+    (re.compile(r'\bcommittment\b', re.IGNORECASE), 'commitment'),
+    (re.compile(r'\boccasionaly\b', re.IGNORECASE), 'occasionally'),
+    (re.compile(r'\bappologize\b', re.IGNORECASE), 'apologize'),
+    (re.compile(r'\bknowlege\b', re.IGNORECASE), 'knowledge'),
+    (re.compile(r'\bknoweldge\b', re.IGNORECASE), 'knowledge'),
+    (re.compile(r'\benviroment\b', re.IGNORECASE), 'environment'),
+    (re.compile(r'\benviornment\b', re.IGNORECASE), 'environment'),
+    (re.compile(r'\bconvinient\b', re.IGNORECASE), 'convenient'),
+    (re.compile(r'\bconvienient\b', re.IGNORECASE), 'convenient'),
+    (re.compile(r'\bmanagment\b', re.IGNORECASE), 'management'),
+    (re.compile(r'\bmanagament\b', re.IGNORECASE), 'management'),
+    (re.compile(r'\bpersonell\b', re.IGNORECASE), 'personnel'),
+    (re.compile(r'\bconsious\b', re.IGNORECASE), 'conscious'),
+    (re.compile(r'\bconcious\b', re.IGNORECASE), 'conscious'),
+    (re.compile(r'\brecognise\b', re.IGNORECASE), 'recognize'),
+    (re.compile(r'\bpronouciation\b', re.IGNORECASE), 'pronunciation'),
+    (re.compile(r'\bpersistance\b', re.IGNORECASE), 'persistence'),
+    (re.compile(r'\boccurence\b', re.IGNORECASE), 'occurrence'),
+]
+
+# Safe contractions: words that are NEVER standalone valid English words
+_CONTRACTION_PATTERNS: List[Tuple[re.Pattern, str]] = [
+    (re.compile(r'\bdont\b', re.IGNORECASE), "don't"),
+    (re.compile(r'\bdoesnt\b', re.IGNORECASE), "doesn't"),
+    (re.compile(r'\bdidnt\b', re.IGNORECASE), "didn't"),
+    (re.compile(r'\bhavent\b', re.IGNORECASE), "haven't"),
+    (re.compile(r'\bhasnt\b', re.IGNORECASE), "hasn't"),
+    (re.compile(r'\bhadnt\b', re.IGNORECASE), "hadn't"),
+    (re.compile(r'\bisnt\b', re.IGNORECASE), "isn't"),
+    (re.compile(r'\bwasnt\b', re.IGNORECASE), "wasn't"),
+    (re.compile(r'\bwerent\b', re.IGNORECASE), "weren't"),
+    (re.compile(r'\bwouldnt\b', re.IGNORECASE), "wouldn't"),
+    (re.compile(r'\bcouldnt\b', re.IGNORECASE), "couldn't"),
+    (re.compile(r'\bshouldnt\b', re.IGNORECASE), "shouldn't"),
+    (re.compile(r'\barent\b', re.IGNORECASE), "aren't"),
+    (re.compile(r'\bwouldve\b', re.IGNORECASE), "would've"),
+    (re.compile(r'\bcouldve\b', re.IGNORECASE), "could've"),
+    (re.compile(r'\bshouldve\b', re.IGNORECASE), "should've"),
+    (re.compile(r'\bmustve\b', re.IGNORECASE), "must've"),
+    (re.compile(r'\bmightve\b', re.IGNORECASE), "might've"),
+]
+
+_FALLBACK_PATTERNS: List[Tuple[re.Pattern, str]] = [
+    # Spelling
+    (re.compile(r'\bgrammer\b', re.IGNORECASE), 'grammar'),
+    (re.compile(r'\bteh\b', re.IGNORECASE), 'the'),
+    (re.compile(r'\badn\b', re.IGNORECASE), 'and'),
+    (re.compile(r'\bthier\b', re.IGNORECASE), 'their'),
+    (re.compile(r'\brecieve\b', re.IGNORECASE), 'receive'),
+    (re.compile(r'\boccured\b', re.IGNORECASE), 'occurred'),
+    (re.compile(r'\bseperate\b', re.IGNORECASE), 'separate'),
+    (re.compile(r'\bdefinately\b', re.IGNORECASE), 'definitely'),
+    (re.compile(r'\bcorection\b', re.IGNORECASE), 'correction'),
+    (re.compile(r'\bneccessary\b', re.IGNORECASE), 'necessary'),
+    (re.compile(r'\bnecesary\b', re.IGNORECASE), 'necessary'),
+    (re.compile(r'\baccomodate\b', re.IGNORECASE), 'accommodate'),
+    (re.compile(r'\brecomend\b', re.IGNORECASE), 'recommend'),
+    (re.compile(r'\breccomend\b', re.IGNORECASE), 'recommend'),
+    (re.compile(r'\bwierd\b', re.IGNORECASE), 'weird'),
+    (re.compile(r'\bbeleive\b', re.IGNORECASE), 'believe'),
+    (re.compile(r'\bexistance\b', re.IGNORECASE), 'existence'),
+    (re.compile(r'\benviroment\b', re.IGNORECASE), 'environment'),
+    # Contractions (safe ones only)
+    (re.compile(r'\bdont\b', re.IGNORECASE), "don't"),
+    (re.compile(r'\bdoesnt\b', re.IGNORECASE), "doesn't"),
+    (re.compile(r'\bdidnt\b', re.IGNORECASE), "didn't"),
+    (re.compile(r'\bhavent\b', re.IGNORECASE), "haven't"),
+    (re.compile(r'\bhasnt\b', re.IGNORECASE), "hasn't"),
+    (re.compile(r'\bhadnt\b', re.IGNORECASE), "hadn't"),
+    (re.compile(r'\bisnt\b', re.IGNORECASE), "isn't"),
+    (re.compile(r'\bwasnt\b', re.IGNORECASE), "wasn't"),
+    (re.compile(r'\bwerent\b', re.IGNORECASE), "weren't"),
+    (re.compile(r'\bwouldnt\b', re.IGNORECASE), "wouldn't"),
+    (re.compile(r'\bcouldnt\b', re.IGNORECASE), "couldn't"),
+    (re.compile(r'\bshouldnt\b', re.IGNORECASE), "shouldn't"),
+    (re.compile(r'\barent\b', re.IGNORECASE), "aren't"),
+    # OCR artefacts
+    (re.compile(r'\btaht\b', re.IGNORECASE), 'that'),
+    (re.compile(r'\bt eh\b', re.IGNORECASE), 'the'),
+    (re.compile(r'\bwi th\b', re.IGNORECASE), 'with'),
+    (re.compile(r'\bfo r\b', re.IGNORECASE), 'for'),
+    (re.compile(r'\bint he\b', re.IGNORECASE), 'in the'),
+    (re.compile(r'\bont he\b', re.IGNORECASE), 'on the'),
+    (re.compile(r'\bwit h\b', re.IGNORECASE), 'with'),
+    (re.compile(r'\bfrorn\b', re.IGNORECASE), 'from'),
+    (re.compile(r'\bwhic h\b', re.IGNORECASE), 'which'),
+    (re.compile(r'\bso me\b', re.IGNORECASE), 'some'),
+    (re.compile(r'\bhav e\b', re.IGNORECASE), 'have'),
+    (re.compile(r'\brn\b'), 'm'),
+    (re.compile(r'\bvv\b'), 'w'),
+]
+
+# Capitalization helpers (compiled once)
+_STANDALONE_I_RE = re.compile(r'\bi\b')
+_SENTENCE_START_RE = re.compile(r'([.!?])\s+([a-z])')
+# Matches words that contain a lowercase letter immediately followed by an uppercase letter
+# anywhere after position 0 — the signature of OCR/typo mid-word stray caps ("heLLo", "tHe").
+# All-caps words (acronyms: "NATO", "SQL") are explicitly excluded by the handler.
+_MID_WORD_CAPS_RE = re.compile(r'\b[a-zA-Z]*[a-z][A-Z][a-zA-Z]*\b')
+
+
+def _lower_unless_acronym(m: re.Match) -> str:
+    """Used by _fix_capitalization to lowercase irregular-cased words while preserving acronyms."""
+    word = m.group(0)
+    return word if word.isupper() else word.lower()
+
+
+# HTML elements that are true content-bearing leaf blocks (not structural containers).
+# Only the innermost matching element is corrected to avoid double-processing nested content.
+_HTML_BLOCK_TAGS = frozenset({
+    'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+    'li', 'td', 'th', 'dt', 'dd',
+    'blockquote', 'figcaption', 'caption', 'label',
+})
+# Tags whose text content should never be grammar-corrected.
+_HTML_SKIP_TAGS = frozenset({'script', 'style', 'code', 'pre', 'kbd', 'var', 'samp'})
 
 
 class GrammarCorrectionProcessor:
@@ -40,15 +201,16 @@ class GrammarCorrectionProcessor:
         self.model = None
         self.tokenizer = None
         self.ocr_reader = None
+        self._ocr_lock = threading.Lock()
+        self._ocr_last_used = 0.0
         self.spell_checker = None
         self._last_used = 0.0
         self._in_use_count = 0
         self._lock = threading.Lock()
-        self._initialize_ocr()
         self._initialize_spell_checker()
 
         GrammarCorrectionProcessor._initialized = True
-        logger.info(" GrammarCorrectionProcessor initialized (singleton, model loads on first use)")
+        logger.info("GrammarCorrectionProcessor initialized (singleton, model and OCR load on first use)")
 
     def ensure_loaded(self):
         with self._lock:
@@ -81,6 +243,17 @@ class GrammarCorrectionProcessor:
         except Exception:
             pass
         logger.info("Model unloaded (idle %ds); RAM freed", timeout)
+
+    def unload_ocr_if_idle(self):
+        timeout = getattr(settings, "OCR_IDLE_UNLOAD_SECONDS", 180) or 180
+        with self._ocr_lock:
+            if self.ocr_reader is None:
+                return
+            if time.time() - self._ocr_last_used < timeout:
+                return
+            self.ocr_reader = None
+        gc.collect()
+        logger.info("OCR unloaded (idle %ds); RAM freed", timeout)
 
     def _load_model(self):
         """Load model with ultimate robust error handling"""
@@ -128,34 +301,32 @@ class GrammarCorrectionProcessor:
                 hf_token = getattr(settings, 'HF_TOKEN', None)
                 self.model, self.tokenizer = load_robust_model(model_source, hf_token=hf_token)
 
+                if self.model is None or self.tokenizer is None:
+                    logger.warning("load_robust_model returned None; check model files at %s or MODEL_ID", model_source)
+
                 if self.model is not None and self.tokenizer is not None:
-                    logger.info(" Model loaded successfully with ultimate robust loader")
-                    
-                    # CPU optimization: Set model to eval mode and CPU, limit threads
+                    logger.info("Model loaded successfully with ultimate robust loader")
                     self.model.eval()
                     self.model.to('cpu')
-                    
-                    # Limit PyTorch CPU threads to prevent CPU exhaustion (critical for 1 CPU plan)
-                    torch.set_num_threads(1)  # Use only 1 thread to prevent CPU overload
-                    torch.set_num_interop_threads(1)
-                    
-                    # Disable gradient computation for inference (saves memory and CPU)
                     for param in self.model.parameters():
                         param.requires_grad = False
 
-                    # Test the model with a simple inference
+                    # INT8 dynamic quantization: ~1.5-2x faster on CPU, ~50% less RAM, minimal accuracy loss
                     try:
-                        test_result = test_model_inference(self.model, self.tokenizer, "This is a test.")
-                        logger.info(" Model test successful: '%s'", test_result)
-                        # Ensure model stays optimized after test (test function may change device/state)
-                        self.model.eval()
-                        self.model.to('cpu')
-                    except (RuntimeError, AttributeError) as test_e:
-                        logger.warning("Model test failed but model loaded: %s", test_e)
-                        # Ensure model is still optimized even if test fails
-                        if self.model is not None:
-                            self.model.eval()
-                            self.model.to('cpu')
+                        self.model = torch.quantization.quantize_dynamic(
+                            self.model, {torch.nn.Linear}, dtype=torch.qint8
+                        )
+                        logger.info("Model quantized to INT8 (dynamic quantization applied)")
+                    except Exception as q_err:
+                        logger.warning("INT8 quantization skipped (using float32): %s", q_err)
+
+                    if not getattr(settings, "SKIP_MODEL_TEST", False):
+                        try:
+                            test_result = test_model_inference(self.model, self.tokenizer, "This is a test.")
+                            logger.info("Model test successful: '%s'", test_result)
+                        except (RuntimeError, AttributeError) as test_e:
+                            logger.warning("Model test failed but model loaded: %s", test_e)
+                    gc.collect()
                 else:
                     logger.warning(" Model loading failed, using fallback")
                     self.model = None
@@ -169,34 +340,32 @@ class GrammarCorrectionProcessor:
             self.model = None
             self.tokenizer = None
 
+    def _ensure_ocr(self):
+        """Lazy-load OCR reader on first image request to reduce peak memory."""
+        with self._ocr_lock:
+            if self.ocr_reader is not None:
+                return
+            try:
+                import easyocr  # pylint: disable=import-outside-toplevel
+                model_dir = getattr(settings, 'OCR_MODEL_DIR', '/app/.EasyOCR/model')
+                os.makedirs(model_dir, exist_ok=True)
+                os.environ['OMP_NUM_THREADS'] = '1'
+                os.environ['MKL_NUM_THREADS'] = '1'
+                self.ocr_reader = easyocr.Reader(
+                    ['en'],
+                    model_storage_directory=model_dir,
+                    gpu=False,
+                    verbose=False
+                )
+                self._ocr_last_used = time.time()
+                logger.info("OCR initialized (lazy) with model directory: %s", model_dir)
+            except (ImportError, OSError, RuntimeError) as e:
+                logger.warning("OCR not available: %s", e)
+                self.ocr_reader = None
+
     def _initialize_ocr(self):
-        """Initialize OCR reader for text extraction from images"""
-        try:
-            import easyocr  # pylint: disable=import-outside-toplevel
-            import os
-            
-            # Use persistent model directory from settings
-            model_dir = getattr(settings, 'OCR_MODEL_DIR', '/app/.EasyOCR/model')
-            
-            # Ensure model directory exists
-            os.makedirs(model_dir, exist_ok=True)
-            
-            # CPU optimization: Limit threads for OCR to prevent CPU exhaustion
-            os.environ['OMP_NUM_THREADS'] = '1'  # Limit OpenMP threads for OCR
-            os.environ['MKL_NUM_THREADS'] = '1'  # Limit MKL threads
-            
-            # Initialize EasyOCR with persistent model directory
-            # This prevents re-downloading models on every request
-            self.ocr_reader = easyocr.Reader(
-                ['en'],
-                model_storage_directory=model_dir,
-                gpu=False,  # Explicitly disable GPU (Render doesn't provide GPU)
-                verbose=False  # Reduce logging overhead
-            )
-            logger.info("OCR initialized with model directory: %s", model_dir)
-        except (ImportError, OSError, RuntimeError) as e:
-            logger.warning("OCR not available: %s", e)
-            self.ocr_reader = None
+        """Legacy entry point; use _ensure_ocr() for lazy init."""
+        self._ensure_ocr()
 
     def _initialize_spell_checker(self):
         """Initialize spell checker for catching spelling errors"""
@@ -207,6 +376,27 @@ class GrammarCorrectionProcessor:
         except (ImportError, Exception) as e:
             logger.warning("Spell checker not available: %s", e)
             self.spell_checker = None
+
+    def _preprocess_image_for_ocr(self, img_array: Any) -> Optional[Any]:
+        """Preprocess image to improve OCR: grayscale, contrast (CLAHE), light denoise."""
+        try:
+            import numpy as np
+            import cv2
+            if img_array is None or (hasattr(img_array, 'shape') and len(img_array.shape) < 2):
+                return None
+            if len(img_array.shape) == 3 and img_array.shape[2] == 3:
+                gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+            else:
+                gray = np.asarray(img_array, dtype=np.uint8)
+                if gray.ndim == 3:
+                    gray = cv2.cvtColor(gray, cv2.COLOR_RGB2GRAY)
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            enhanced = clahe.apply(gray)
+            denoised = cv2.bilateralFilter(enhanced, 5, 50, 50)
+            return cv2.cvtColor(denoised, cv2.COLOR_GRAY2BGR)
+        except Exception as e:
+            logger.debug("OCR preprocessing skipped: %s", e)
+            return None
 
     def is_ready(self) -> Dict[str, bool]:
         """Check readiness"""
@@ -283,64 +473,37 @@ class GrammarCorrectionProcessor:
             Tuple of (extracted_text, metadata)
         """
         if input_type == 'image':
+            self._ensure_ocr()
             if not self.ocr_reader:
                 logger.error("OCR reader not available")
                 return [], []
 
             try:
-                # Memory optimization: Resize large images before OCR to reduce memory usage
-                # This prevents OOM kills on limited RAM (2GB) systems
-                max_dimension = 2048  # Maximum width or height
-                original_content_path = content
-                temp_file_created = False
-                temp_file_path = None
-                
+                import numpy as np
+                max_dimension = getattr(settings, "OCR_MAX_DIMENSION", 1024)
+
                 img = Image.open(content)
                 original_size = img.size
-                
-                # Resize if image is too large
                 if max(img.size) > max_dimension:
                     ratio = max_dimension / max(img.size)
                     new_size = (int(img.size[0] * ratio), int(img.size[1] * ratio))
                     img = img.resize(new_size, Image.Resampling.LANCZOS)
                     logger.info("Resized image from %s to %s for memory efficiency", original_size, new_size)
-                    
-                    # Save resized image temporarily
-                    import tempfile
-                    temp_path = tempfile.mktemp(suffix='.jpg')
-                    img.save(temp_path, 'JPEG', quality=85, optimize=True)
-                    img.close()  # Free memory
-                    content = temp_path
-                    temp_file_path = temp_path
-                    temp_file_created = True
-                else:
-                    img.close()  # Close even if not resized to free memory
-                
-                results = self.ocr_reader.readtext(content)
+                img_array = np.array(img)
+                img.close()
+                if len(img_array.shape) == 2:
+                    img_array = np.stack([img_array] * 3, axis=-1)
+                ocr_input = self._preprocess_image_for_ocr(img_array)
+                if ocr_input is None:
+                    ocr_input = img_array
+                self._ocr_last_used = time.time()
+                results = self.ocr_reader.readtext(ocr_input)
+                self._ocr_last_used = time.time()
                 extracted_texts = [item[1] for item in results]
-                
-                # Clean up temporary file if created
-                if temp_file_created and temp_file_path and os.path.exists(temp_file_path):
-                    try:
-                        os.unlink(temp_file_path)
-                    except OSError:
-                        pass
-                
-                # Force garbage collection to free memory
-                import gc
                 gc.collect()
-                
                 return extracted_texts, results
             except (OSError, ValueError, AttributeError) as e:
                 logger.error("Error during OCR: %s", e)
-                # Clean up temporary file if created (fix for resource leak)
-                if 'temp_file_path' in locals() and temp_file_path and os.path.exists(temp_file_path):
-                    try:
-                        os.unlink(temp_file_path)
-                    except OSError:
-                        pass
-                # Force garbage collection on error
-                import gc
                 gc.collect()
                 return [], []
 
@@ -355,9 +518,6 @@ class GrammarCorrectionProcessor:
             # Use get_text() to extract all text, preserving structure for reconstruction
             extracted_text = soup.get_text(separator=' ', strip=False)
             
-            # Clean up excessive whitespace while preserving structure
-            # Replace multiple spaces/newlines with single space, but keep line breaks for readability
-            import re
             extracted_text = re.sub(r'\s+', ' ', extracted_text)
             extracted_text = extracted_text.strip()
 
@@ -366,38 +526,139 @@ class GrammarCorrectionProcessor:
 
         return None, None
 
+    def _normalize_known_spellings(self, text: str) -> str:
+        """Pre-pass: fix known misspellings so the model sees cleaner input. Uses pre-compiled patterns."""
+        out = text
+        for pattern, repl in _NORMALIZE_PATTERNS:
+            out = pattern.sub(repl, out)
+        return out
+
+    def _fix_contractions(self, text: str) -> str:
+        """Post-correction pass: restore contractions that spell checker or model may have left bare.
+        Only applies patterns that are never standalone valid English words."""
+        out = text
+        for pattern, repl in _CONTRACTION_PATTERNS:
+            out = pattern.sub(repl, out)
+        return out
+
+    def _fix_capitalization(self, text: str) -> str:
+        """Fix capitalization errors the model may miss:
+        1. Mid-word stray uppercase (OCR artefacts: 'heLLo' -> 'hello', 'tHe' -> 'the')
+        2. Standalone 'i' -> 'I'
+        3. First character of the entire text
+        4. First letter after sentence-ending punctuation (. ! ?)
+
+        Step 1 runs before steps 3-4 so that lowercased words are re-capitalised
+        correctly at sentence boundaries.
+        """
+        if not text:
+            return text
+
+        # 1. Fix mid-word stray uppercase (e.g. "heLLo" -> "hello", "tHe" -> "the")
+        text = _MID_WORD_CAPS_RE.sub(_lower_unless_acronym, text)
+
+        # 2. Standalone pronoun 'i' -> 'I'
+        text = _STANDALONE_I_RE.sub('I', text)
+
+        # 3. Capitalize the very first letter if it is lowercase
+        if text[0].islower():
+            text = text[0].upper() + text[1:]
+
+        # 4. Capitalize first letter after '. ' / '! ' / '? '
+        text = _SENTENCE_START_RE.sub(lambda m: m.group(1) + ' ' + m.group(2).upper(), text)
+
+        return text
+
+    def _correct_html_blocks(self, soup, full_text: str) -> Tuple[str, List[Dict]]:
+        """
+        Correct each leaf block-level HTML element independently so the model always
+        sees a coherent grammatical unit instead of a mixed-context text blob.
+
+        Returns (reassembled_corrected_text, combined_corrections_list).
+        Falls back to flat correction when no qualifying blocks are found.
+
+        CPU cost: roughly equivalent to flat correction — same total token count,
+        but split across N sequential calls (each one is shorter and therefore faster).
+        Blocks that are too short (<10 chars) are skipped to avoid wasted inference.
+        """
+        # Collect leaf block elements: block-level tags that contain no nested block children
+        candidate_blocks: List[Tuple[Any, str]] = []
+        for el in soup.find_all(_HTML_BLOCK_TAGS):
+            # Skip elements inside code/script/style
+            if any(p.name in _HTML_SKIP_TAGS for p in el.parents):
+                continue
+            # Only process leaf blocks — skip if any child is itself a block-level element
+            if el.find(_HTML_BLOCK_TAGS):
+                continue
+            text = el.get_text(strip=True)
+            if len(text) < 40:
+                continue
+            candidate_blocks.append((el, text))
+
+        if not candidate_blocks:
+            # Fallback: correct the full extracted text as one unit
+            corrected = self.correct_grammar(full_text)
+            return corrected, self.identify_corrections(full_text, corrected)
+
+        orig_parts: List[str] = []
+        corr_parts: List[str] = []
+        all_corrections: List[Dict] = []
+
+        for _el, block_text in candidate_blocks:
+            corrected_block = self.correct_grammar(block_text)
+            orig_parts.append(block_text)
+            corr_parts.append(corrected_block)
+            all_corrections.extend(self.identify_corrections(block_text, corrected_block))
+
+        return " ".join(corr_parts), all_corrections
+
     def correct_grammar(self, text: str) -> str:
         """Correct grammar with chunked processing and spell checking"""
         if not self.model or not self.tokenizer:
-            logger.info("Model not available, using fallback correction")
-            return self._fallback_correction(text)
+            logger.warning(
+                "Model not available (model=%s, tokenizer=%s), using fallback. Check MODEL_PATH and MODEL_ID, or see startup logs for load errors.",
+                self.model is not None,
+                self.tokenizer is not None,
+            )
+            result = self._fallback_correction(text)
+            result = self._fix_contractions(result)
+            return self._fix_capitalization(result)
 
         try:
-            # Clean and prepare text for processing
             text = text.strip()
             if not text:
                 return text
+            text = self._normalize_known_spellings(text)
 
-            # Step 1: Apply model correction
-            # Check text length - if it's too long, process in chunks
-            # Estimate tokens (rough approximation: 1 token ≈ 0.75 words)
+            # Pre-spell-check: fix OCR character-level errors before the grammar model sees
+            # them. Without this, garbled words like "cooiing" or "uindoivs" are simply
+            # deleted by the T5 model rather than corrected.
+            if self.spell_checker:
+                text = self._apply_spell_checking(text)
+
+            max_tokens_per_chunk = getattr(settings, "MODEL_CHUNK_MAX_TOKENS", 128)
             estimated_tokens = len(text.split()) * 1.33
-            max_tokens_per_chunk = 100  # Leave some margin below 128 limit
-            
+            logger.info("correct_grammar: %d estimated tokens, input[:100]=%r", int(estimated_tokens), text[:100])
+
             if estimated_tokens <= max_tokens_per_chunk:
-                # Text is short enough, process normally
                 model_corrected = self._correct_grammar_chunk(text)
             else:
-                # Text is too long, process in chunks
                 logger.info("Text is long (%d estimated tokens), processing in chunks", int(estimated_tokens))
                 model_corrected = self._correct_grammar_chunked(text, max_tokens_per_chunk)
-            
-            # Step 2: Apply spell checking after model correction
+
+            logger.info("model output[:100]=%r", model_corrected[:100])
+
             if self.spell_checker:
-                spell_corrected = self._apply_spell_checking(model_corrected)
-                return spell_corrected
+                result = self._apply_spell_checking(model_corrected)
             else:
-                return model_corrected
+                result = model_corrected
+            result = self._fix_contractions(result)
+            final = self._fix_capitalization(result)
+            if final.strip() == text.strip():
+                logger.info("correct_grammar: model+pipeline made NO changes to text")
+            else:
+                logger.info("correct_grammar: changes detected, output[:100]=%r", final[:100])
+            return final
 
         except Exception as e:
             logger.error("Error in correct_grammar: %s", e, exc_info=True)
@@ -406,30 +667,22 @@ class GrammarCorrectionProcessor:
     def _correct_grammar_chunk(self, text: str) -> str:
         """Correct grammar for a single chunk of text"""
         try:
-            # CPU optimization: Model is already on CPU and in eval mode
-            # No need to move to device on every call (saves CPU cycles)
-            device = torch.device("cpu")  # Always use CPU (Render doesn't provide GPU)
-            
-            # Ensure model is in eval mode (disable dropout, batch norm updates)
-            self.model.eval()
-
-            # Tokenize the input text (exactly like googlecolab.py)
-            inputs = self.tokenizer(text, return_tensors="pt", padding=True, truncation=True, max_length=128)
+            device = torch.device("cpu")
+            max_len = getattr(settings, "MODEL_MAX_LENGTH", 256)
+            inputs = self.tokenizer(text, return_tensors="pt", padding=True, truncation=True, max_length=max_len)
             input_ids = inputs['input_ids'].to(device)
             attention_mask = inputs['attention_mask'].to(device)
 
-            # Generate the corrected text (exactly like googlecolab.py)
-            # CPU optimization: Use fewer beams and disable gradient computation
-            num_beams = getattr(settings, "MODEL_NUM_BEAMS", 5)
-            with torch.no_grad():
+            num_beams = getattr(settings, "MODEL_NUM_BEAMS", 2)
+            with torch.inference_mode():
                 generated_ids = self.model.generate(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
-                    max_length=128,
+                    max_length=max_len,
                     num_beams=num_beams,
-                    early_stopping=True,
-                    do_sample=False,  # Disable sampling for deterministic, faster inference
-                    num_return_sequences=1  # Only return one sequence
+                    early_stopping=(num_beams > 1),
+                    do_sample=False,
+                    num_return_sequences=1,
                 )
 
             # Decode the generated IDs to text
@@ -447,8 +700,48 @@ class GrammarCorrectionProcessor:
         except Exception as e:
             logger.error("Error correcting chunk: %s", e)
             return self._fallback_correction(text)
-    
-    def _correct_grammar_chunked(self, text: str, max_tokens_per_chunk: int = 100) -> str:
+
+    def _correct_grammar_batched(self, chunks: List[str]) -> List[str]:
+        """Process multiple chunks in one model forward pass. Memory use scales with batch size."""
+        if not chunks or not self.model or not self.tokenizer:
+            return [self._fallback_correction(c) for c in chunks] if chunks else []
+        try:
+            device = torch.device("cpu")
+            max_len = getattr(settings, "MODEL_MAX_LENGTH", 128)
+            num_beams = getattr(settings, "MODEL_NUM_BEAMS", 2)
+            inputs = self.tokenizer(
+                chunks,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=max_len,
+            )
+            input_ids = inputs["input_ids"].to(device)
+            attention_mask = inputs["attention_mask"].to(device)
+            with torch.inference_mode():
+                generated_ids = self.model.generate(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    max_length=max_len,
+                    num_beams=num_beams,
+                    early_stopping=(num_beams > 1),
+                    do_sample=False,
+                    num_return_sequences=1,
+                )
+            corrected = []
+            for i in range(generated_ids.size(0)):
+                decoded = self.tokenizer.decode(generated_ids[i], skip_special_tokens=True).strip()
+                if not decoded:
+                    decoded = self._fallback_correction(chunks[i])
+                corrected.append(decoded)
+            del input_ids, attention_mask, generated_ids
+            gc.collect()
+            return corrected
+        except Exception as e:
+            logger.warning("Batch inference failed, falling back to sequential: %s", e)
+            return [self._correct_grammar_chunk(c) for c in chunks]
+
+    def _correct_grammar_chunked(self, text: str, max_tokens_per_chunk: int = 128) -> str:
         """Process long text in chunks and combine results"""
         # Split text into sentences for better chunking
         # This preserves sentence boundaries which helps the model
@@ -486,19 +779,20 @@ class GrammarCorrectionProcessor:
         if current_chunk:
             chunks.append(current_chunk)
         
-        logger.info("Split text into %d chunks for processing", len(chunks))
-        
-        # Process each chunk
+        batch_size = max(1, getattr(settings, "MODEL_BATCH_CHUNKS", 1))
+        logger.info("Split text into %d chunks, processing in batches of %d", len(chunks), batch_size)
+
         corrected_chunks = []
-        for i, chunk in enumerate(chunks):
-            logger.debug("Processing chunk %d/%d (length: %d chars)", i + 1, len(chunks), len(chunk))
-            corrected_chunk = self._correct_grammar_chunk(chunk)
-            corrected_chunks.append(corrected_chunk)
-        
-        # Combine corrected chunks
+        for start in range(0, len(chunks), batch_size):
+            batch = chunks[start:start + batch_size]
+            if len(batch) == 1 and batch_size == 1:
+                corrected_chunks.append(self._correct_grammar_chunk(batch[0]))
+            else:
+                corrected_chunks.extend(self._correct_grammar_batched(batch))
+
         corrected_text = " ".join(corrected_chunks)
-        
-        # Check if any corrections were made
+        gc.collect()
+
         if corrected_text.strip() == text.strip():
             logger.info("No grammar errors found after chunked processing")
         else:
@@ -512,125 +806,67 @@ class GrammarCorrectionProcessor:
         return original.strip() != corrected.strip()
     
     def _apply_spell_checking(self, text: str) -> str:
-        """Apply spell checking to catch errors the model missed"""
+        """Apply spell checking to catch errors the model missed. Batches unknown() for speed."""
         if not self.spell_checker:
             return text
-        
         try:
-            # Split text into words while preserving punctuation and spacing
-            # Use regex to find words (sequences of letters, including apostrophes)
-            # Improved pattern to handle all word characters including uppercase
-            words = re.findall(r"(\b[\w']+\b|\W+)", text)
-            corrected_words = []
-            corrections_made = 0
-            
-            for word in words:
-                # Skip non-word tokens (punctuation, spaces, newlines)
-                if not re.match(r"^[\w']+$", word):
-                    corrected_words.append(word)
+            tokens = re.findall(r"(\b[\w']+\b|\W+)", text)
+            word_pattern = re.compile(r"^[\w']+$")
+
+            # Collect indices and normalised forms of candidate words in one pass
+            candidate_indices: List[int] = []
+            candidates: List[str] = []
+            for i, token in enumerate(tokens):
+                if not word_pattern.match(token):
                     continue
-                
-                # Check spelling (case-insensitive)
-                # Convert to lowercase for checking, but preserve original case
-                word_lower = word.lower()
-                # Remove apostrophes for checking (e.g., "don't" -> "dont")
-                word_for_check = word_lower.replace("'", "")
-                
-                # Skip very short words (likely abbreviations or valid)
-                if len(word_for_check) < 3:
-                    corrected_words.append(word)
+                normalised = token.lower().replace("'", "")
+                if len(normalised) < 3:
                     continue
-                
-                # Check if word is misspelled
-                # Use unknown() method to check if word is misspelled
-                # This is more reliable than checking dictionary membership
-                unknown_words = self.spell_checker.unknown([word_for_check])
-                is_misspelled = word_for_check in unknown_words
-                
-                if word_for_check and is_misspelled:
-                    # Word is misspelled, get correction
-                    correction = self.spell_checker.correction(word_for_check)
-                    
-                    if correction and correction != word_for_check and len(correction) > 0:
-                        # Preserve original case
-                        if word.isupper():
-                            # All caps - keep all caps
-                            correction = correction.upper()
-                        elif word[0].isupper():
-                            # Title case - capitalize first letter
-                            correction = correction.capitalize()
-                        # else: keep lowercase
-                        
-                        corrected_words.append(correction)
-                        corrections_made += 1
-                        logger.info("Spell checker correction: '%s' -> '%s'", word, correction)
-                    else:
-                        # No correction found, keep original
-                        corrected_words.append(word)
-                else:
-                    # Word is correctly spelled
-                    corrected_words.append(word)
-            
-            if corrections_made > 0:
-                corrected_text = ''.join(corrected_words)
-                logger.info("Spell checker applied %d corrections", corrections_made)
-                return corrected_text
-            else:
-                logger.debug("Spell checker found no errors")
+                candidate_indices.append(i)
+                candidates.append(normalised)
+
+            if not candidates:
                 return text
-                
+
+            # Single batch call - much cheaper than N individual calls
+            unknown_set = self.spell_checker.unknown(candidates)
+
+            corrected = list(tokens)
+            corrections_made = 0
+            for idx, normalised in zip(candidate_indices, candidates):
+                if normalised not in unknown_set:
+                    continue
+                suggestion = self.spell_checker.correction(normalised)
+                if not suggestion or suggestion == normalised:
+                    continue
+                original_token = tokens[idx]
+                if original_token.isupper():
+                    suggestion = suggestion.upper()
+                elif original_token[0].isupper():
+                    suggestion = suggestion.capitalize()
+                corrected[idx] = suggestion
+                corrections_made += 1
+                logger.info("Spell checker: '%s' -> '%s'", original_token, suggestion)
+
+            if corrections_made > 0:
+                logger.info("Spell checker applied %d corrections", corrections_made)
+                return ''.join(corrected)
+            return text
         except Exception as e:
             logger.error("Error in spell checking: %s", e, exc_info=True)
             return text
 
     def _fallback_correction(self, text: str) -> str:
-        """Enhanced fallback corrections for common errors and OCR mistakes"""
-        corrections = {
-            # Common spelling mistakes
-            r'\bgrammer\b': 'grammar',
-            r'\bteh\b': 'the',
-            r'\badn\b': 'and',
-            r'\bthier\b': 'their',
-            r'\brecieve\b': 'receive',
-            r'\boccured\b': 'occurred',
-            r'\bseperate\b': 'separate',
-            r'\bdefinately\b': 'definitely',
-
-            # Contractions
-            r'\bdont\b': "don't",
-            r'\bwont\b': "won't",
-            r'\bcant\b': "can't",
-            r'\bdoesnt\b': "doesn't",
-            r'\bdidnt\b': "didn't",
-            r'\bhavent\b': "haven't",
-            r'\bhasnt\b': "hasn't",
-            r'\bhadnt\b': "hadn't",
-            r'\bisnt\b': "isn't",
-            r'\bwasnt\b': "wasn't",
-            r'\bwerent\b': "weren't",
-            r'\bwouldnt\b': "wouldn't",
-            r'\bcouldnt\b': "couldn't",
-            r'\bshouldnt\b': "shouldn't",
-
-            # OCR common mistakes (letter confusions)
-            r'\b0\b': 'O',  # Zero confused with letter O
-            r'\bl\b(?=[A-Z])': 'I',  # lowercase L confused with I
-            r'\brn\b': 'm',  # rn confused with m
-            r'\bvv\b': 'w',  # vv confused with w
-        }
-
+        """Fallback corrections when model is unavailable. Uses pre-compiled patterns."""
         corrected_text = text
         corrections_made = 0
-
-        for pattern, replacement in corrections.items():
-            new_text = re.sub(pattern, replacement, corrected_text, flags=re.IGNORECASE)
+        for pattern, replacement in _FALLBACK_PATTERNS:
+            new_text = pattern.sub(replacement, corrected_text)
             if new_text != corrected_text:
                 corrections_made += 1
             corrected_text = new_text
-
         if corrections_made > 0:
             logger.info("Fallback correction applied %d fixes", corrections_made)
-
         return corrected_text
 
     def identify_corrections(self, original_text: str, corrected_text: str, context_words: int = 3) -> List[Dict[str, str]]:
@@ -642,8 +878,9 @@ class GrammarCorrectionProcessor:
 
         # Quick check: if texts are identical, no corrections needed
         if original_text.strip() == corrected_text.strip():
-            logger.info("No corrections needed - texts are identical")
+            logger.info("identify_corrections: texts are identical, no corrections")
             return []
+        logger.info("identify_corrections: orig_len=%d corrected_len=%d", len(original_text), len(corrected_text))
 
         # Tokenize including punctuation as separate tokens (exactly like googlecolab.py)
         original_tokens_with_sep = re.findall(r'(\b\w+\b|\W+)', original_text)
@@ -731,10 +968,8 @@ class GrammarCorrectionProcessor:
                             logger.error("Error getting corrected context for %s: %s", corr, e)
                             corrected_context = ""
 
-                        # Only add meaningful corrections (filter out empty or unchanged corrections)
                         if (orig.strip() != corr.strip() and
-                            (orig.strip() != '' or corr.strip() != '') and
-                            original_context.strip() != corrected_context.strip()):
+                                (orig.strip() != '' or corr.strip() != '')):
                             corrections.append({
                                 'original_word': orig.strip(),
                                 'corrected_word': corr.strip(),
@@ -793,10 +1028,8 @@ class GrammarCorrectionProcessor:
                     logger.error("Error getting corrected context for %s at end: %s", corr, e)
                     corrected_context = ""
 
-                # Only add meaningful corrections (filter out empty or unchanged corrections)
                 if (orig.strip() != corr.strip() and
-                    (orig.strip() != '' or corr.strip() != '') and
-                    original_context.strip() != corrected_context.strip()):
+                        (orig.strip() != '' or corr.strip() != '')):
                     corrections.append({
                         'original_word': orig.strip(),
                         'corrected_word': corr.strip(),
@@ -804,25 +1037,50 @@ class GrammarCorrectionProcessor:
                         'corrected_context': corrected_context
                     })
 
-        # Final filter: remove meaningless corrections for website display
+        # Build a set of original words that were flagged as unknown by the spell checker.
+        # Corrections where the original word was already correct in the dictionary are
+        # likely model rephrasings (false positives) and are excluded.
+        original_words_in_corrections = {
+            c['original_word'] for c in corrections if c['original_word'].strip()
+        }
+        if self.spell_checker and original_words_in_corrections:
+            unknown_originals = self.spell_checker.unknown(list(original_words_in_corrections))
+        else:
+            unknown_originals = original_words_in_corrections
+
         cleaned_corrections = []
         for corr_dict in corrections:
             orig_word = corr_dict['original_word']
             corr_word = corr_dict['corrected_word']
-            orig_context = corr_dict['original_context']
-            corr_context = corr_dict['corrected_context']
+            if orig_word == corr_word:
+                continue
+            if not orig_word.strip() and not corr_word.strip():
+                continue
 
-            # Only keep corrections that are meaningful for website display:
-            # 1. Words are actually different
-            # 2. At least one word is not empty
-            # 3. Contexts are different (indicating actual change)
-            # 4. Both words are not empty (avoid empty corrections)
-            if (orig_word != corr_word and
-                (orig_word != '' or corr_word != '') and
-                orig_context != corr_context and
-                orig_word.strip() != '' and corr_word.strip() != ''):
-                cleaned_corrections.append(corr_dict)
+            # The grammar model sometimes deletes OCR-garbled words instead of correcting them,
+            # producing corrected_word="". In that case, ask the spell checker what the word
+            # should be and use that as the corrected word.
+            if orig_word.strip() and not corr_word.strip():
+                if self.spell_checker:
+                    suggestion = self.spell_checker.correction(orig_word)
+                    if suggestion and suggestion.lower() != orig_word.lower():
+                        corr_dict = dict(corr_dict)
+                        corr_dict['corrected_word'] = suggestion
+                        cleaned_corrections.append(corr_dict)
+                # Do not report a pure deletion with no spell-checker alternative
+                continue
 
+            # For substitutions, only report if the original word was not in the dictionary
+            # (i.e., it was genuinely misspelled), to avoid reporting model rephrasings.
+            if orig_word.strip() and orig_word not in unknown_originals:
+                continue
+
+            cleaned_corrections.append(corr_dict)
+
+        cleaned_corrections = [
+            c for c in cleaned_corrections
+            if c.get('original_word', '').strip() and c.get('corrected_word', '').strip()
+        ]
         logger.info("Filtered corrections: %d -> %d meaningful corrections", len(corrections), len(cleaned_corrections))
 
         return cleaned_corrections
@@ -842,7 +1100,9 @@ class GrammarCorrectionProcessor:
                 return None
         if not corrections and input_type == 'html':
             logger.info("No corrections identified for %s. Returning original content.", input_type)
-            return original_content
+            if isinstance(original_content, tuple) and len(original_content) == 2:
+                return original_content[1]
+            return str(original_content) if original_content else None
 
         # Proceed with highlighting only if corrections exist
         if input_type == 'image':
@@ -873,12 +1133,11 @@ class GrammarCorrectionProcessor:
                     if corr_dict['original_word'] != corr_dict['corrected_word']
                 }
 
-                # Set a confidence threshold for highlighting
-                confidence_threshold = 0.5
+                confidence_threshold = getattr(
+                    settings, "OCR_CONFIDENCE_THRESHOLD", 0.5
+                )
 
-                # Iterate through the EasyOCR results (text blocks)
                 for (bbox, text, confidence) in original_ocr_results:
-                    # Only consider highlighting if confidence is above threshold
                     if confidence >= confidence_threshold:
                         # Get the bounding box coordinates as integers
                         x_coords = [int(p[0]) for p in bbox]
@@ -909,16 +1168,11 @@ class GrammarCorrectionProcessor:
                                 # Draw a highlight (red rectangle border) around the approximate word bounding box
                                 draw.rectangle([(word_x1, word_y1), (word_x2, word_y2)], outline='red', width=2)
 
-                # Force garbage collection before returning
-                import gc
                 gc.collect()
-                
-                return img  # Return the PIL Image object
+                return img
 
             except (OSError, IOError, ValueError) as e:
                 logger.error("Error processing image for highlighting: %s", e)
-                # Clean up on error
-                import gc
                 gc.collect()
                 return None
 
@@ -1215,16 +1469,18 @@ class GrammarCorrectionProcessor:
                     "processing_time_seconds": time.time() - start_time
                 }
 
-            # 3. Correct grammar
-            corrected_text = self.correct_grammar(text_to_correct)
-
-            # 4. Identify corrections
-            if input_type == 'image':
-                original_text_for_comparison = " ".join(extracted_texts) if extracted_texts else ""
+            # 3. Correct grammar + 4. Identify corrections
+            if input_type == 'html':
+                # Per-block correction: each paragraph/cell/heading is corrected
+                # independently so the model sees coherent grammatical units.
+                soup_obj, _ = original_content_for_reconstruct
+                corrected_text, corrections = self._correct_html_blocks(soup_obj, text_to_correct)
             else:
-                original_text_for_comparison = extracted_text
-
-            corrections = self.identify_corrections(original_text_for_comparison, corrected_text)
+                corrected_text = self.correct_grammar(text_to_correct)
+                original_text_for_comparison = (
+                    " ".join(extracted_texts) if input_type == 'image' else text_to_correct
+                )
+                corrections = self.identify_corrections(original_text_for_comparison, corrected_text)
 
             # 5. Reconstruct with highlighting
             reconstructed_content = self.reconstruct_with_highlighting(
@@ -1244,9 +1500,6 @@ class GrammarCorrectionProcessor:
             )
 
             processing_time = time.time() - start_time
-
-            # Memory optimization: Force garbage collection after processing
-            import gc
             gc.collect()
 
             return {
@@ -1262,8 +1515,6 @@ class GrammarCorrectionProcessor:
 
         except (OSError, RuntimeError, ValueError) as e:
             logger.error("Error in process_input: %s", e, exc_info=True)
-            # Clean up memory on error
-            import gc
             gc.collect()
             return {
                 "success": False,

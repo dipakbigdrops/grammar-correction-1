@@ -19,20 +19,26 @@ class Settings(BaseSettings):
     # API Settings
     API_HOST: str = "0.0.0.0"
     API_PORT: int = 8000
-    API_WORKERS: int = 4
+    API_WORKERS: int = 1  # Single worker; T5 model is large — multiple workers multiply RAM usage
     
     # Model Settings
     MODEL_PATH: str = "./model"
-    MODEL_ID: str = ""  # Hugging Face model ID (e.g., "dipak-bigdrops/grammar-correction-model")
+    MODEL_ID: str = "dipak-bigdrops/grammar-correction-model"
     HF_TOKEN: str = ""  # Hugging Face token (optional, only needed for private models)
-    MODEL_MAX_LENGTH: int = 128
-    MODEL_NUM_BEAMS: int = 5
-    MODEL_IDLE_UNLOAD_SECONDS: int = 300
+    MODEL_MAX_LENGTH: int = 256
+    MODEL_NUM_BEAMS: int = 2
+    MODEL_CHUNK_MAX_TOKENS: int = 256
+    MODEL_BATCH_CHUNKS: int = 1
+    MODEL_IDLE_UNLOAD_SECONDS: int = 600
+    SKIP_MODEL_TEST: bool = False
 
     # OCR Settings
     OCR_LANGUAGES: list = ["en"]
     OCR_CONFIDENCE_THRESHOLD: float = 0.5
-    OCR_MODEL_DIR: str = "/app/.EasyOCR/model"  # Persistent model directory in Docker image
+    OCR_MODEL_DIR: str = "/app/.EasyOCR/model"
+    OCR_MAX_DIMENSION: int = 1024
+    OCR_IDLE_UNLOAD_SECONDS: int = 180
+
     
     # Processing Settings
     MAX_FILE_SIZE: int = 20 * 1024 * 1024  # 20MB
@@ -43,8 +49,8 @@ class Settings(BaseSettings):
     MAX_FILES_IN_ZIP: int = 100  # Maximum files to process from ZIP
     CONTEXT_WORDS: int = 3
     
-    # Cache Settings (in-memory only)
-    CACHE_TTL: int = 3600  # 1 hour
+    # Cache Settings (in-memory only; lower TTL reduces memory use)
+    CACHE_TTL: int = 300  # 5 minutes
     ENABLE_CACHING: bool = True
     
     # Monitoring Settings
@@ -78,15 +84,19 @@ class Settings(BaseSettings):
     STREAMING_PROCESSING: bool = True  # Process files as they're extracted
     
     # Resource Optimization
-    WORKER_CPU_LIMIT: float = 0.5  # 0.5 CPU per worker
-    WORKER_MEMORY_LIMIT: int = 1024  # 1GB per worker
-    WORKER_CONCURRENCY: int = 1  # One batch at a time
+    WORKER_CPU_LIMIT: float = 0.5
+    WORKER_MEMORY_LIMIT: int = 1024
+    WORKER_CONCURRENCY: int = 1
+    # How many /process requests can run simultaneously.
+    # 1 vCPU → set to 1.  2 vCPUs → set to 2.
+    # Requests beyond this limit receive HTTP 503 immediately.
+    MAX_CONCURRENT_REQUESTS: int = 1
     
     # Multi-Level Caching
-    CACHE_TTL_TEXT: int = 86400  # 24 hours for text content
-    CACHE_TTL_MODEL: int = 3600  # 1 hour for model outputs
-    CACHE_TTL_OCR: int = 7200  # 2 hours for OCR results
-    CACHE_TTL_PARTIAL: int = 1800  # 30 minutes for partial results
+    CACHE_TTL_TEXT: int = 300   # 5 minutes
+    CACHE_TTL_MODEL: int = 300  # 5 minutes
+    CACHE_TTL_OCR: int = 300    # 5 minutes
+    CACHE_TTL_PARTIAL: int = 300  # 5 minutes
     
     # Cache Hit Rate Optimization
     ENABLE_TEXT_CACHING: bool = True
@@ -137,12 +147,16 @@ class Settings(BaseSettings):
                         # Split by comma and strip whitespace
                         setattr(self, field, [item.strip() for item in value.split(",") if item.strip()])
         
-        # Validate batch processing settings
+        if self.MODEL_BATCH_CHUNKS > 4:
+            self.MODEL_BATCH_CHUNKS = 4
+        if self.MODEL_NUM_BEAMS > 3:
+            self.MODEL_NUM_BEAMS = 3
+
         if self.MAX_FILES_IN_ZIP > 1000:
-            self.MAX_FILES_IN_ZIP = 1000  # Cap at 1000 for performance
-        
-        if self.MAX_ZIP_EXTRACT_SIZE > 500 * 1024 * 1024:  # 500MB
-            self.MAX_ZIP_EXTRACT_SIZE = 500 * 1024 * 1024  # Cap at 500MB
+            self.MAX_FILES_IN_ZIP = 1000
+
+        if self.MAX_ZIP_EXTRACT_SIZE > 500 * 1024 * 1024:
+            self.MAX_ZIP_EXTRACT_SIZE = 500 * 1024 * 1024
 
 
 @lru_cache()

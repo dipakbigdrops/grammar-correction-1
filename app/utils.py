@@ -5,7 +5,22 @@ import hashlib
 import json
 import logging
 import os
+import tempfile
 from typing import Optional
+
+
+def get_upload_dir() -> str:
+    """Cross-platform upload directory (works on Windows and Linux)."""
+    if os.name == "nt":
+        return os.path.join(tempfile.gettempdir(), "grammar_uploads")
+    return "/tmp/uploads"
+
+
+def get_output_dir() -> str:
+    """Cross-platform output directory."""
+    if os.name == "nt":
+        return os.path.join(tempfile.gettempdir(), "grammar_outputs")
+    return "/tmp/outputs"
 
 from app.config import settings
 
@@ -80,9 +95,9 @@ def set_cached_result(file_hash: str, result: dict):
 def create_directories():
     """Create necessary directories"""
     directories = [
-        "/tmp/uploads",
-        "/tmp/outputs",
-        "/tmp/cache"
+        get_upload_dir(),
+        get_output_dir(),
+        os.path.join(tempfile.gettempdir(), "grammar_cache") if os.name == "nt" else "/tmp/cache"
     ]
 
     for directory in directories:
@@ -94,7 +109,8 @@ def create_directories():
 
 def save_uploaded_file(content: bytes, filename: str) -> str:
     """Save uploaded file to temp directory and return path. Filename is sanitized to prevent path traversal."""
-    base_dir = os.path.abspath("/tmp/uploads")
+    base_dir = os.path.abspath(get_upload_dir())
+    os.makedirs(base_dir, exist_ok=True)
     safe_basename = os.path.basename(filename.replace("\\", "/").strip()) if filename else "unnamed"
     if not safe_basename:
         safe_basename = "unnamed"
