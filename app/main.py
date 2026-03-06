@@ -433,6 +433,7 @@ async def process_file(
             finally:
                 _processing_semaphore.release()
 
+            logger.info("Processing completed for %s, returning response", original_filename)
             stats = universal_processor.get_performance_stats()
             result['performance_stats'] = stats
 

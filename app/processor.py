@@ -484,9 +484,12 @@ class GrammarCorrectionProcessor:
 
                 img = Image.open(content)
                 original_size = img.size
+                ocr_scale_x, ocr_scale_y = 1.0, 1.0
                 if max(img.size) > max_dimension:
                     ratio = max_dimension / max(img.size)
                     new_size = (int(img.size[0] * ratio), int(img.size[1] * ratio))
+                    ocr_scale_x = original_size[0] / new_size[0]
+                    ocr_scale_y = original_size[1] / new_size[1]
                     img = img.resize(new_size, Image.Resampling.LANCZOS)
                     logger.info("Resized image from %s to %s for memory efficiency", original_size, new_size)
                 img_array = np.array(img)
@@ -499,9 +502,20 @@ class GrammarCorrectionProcessor:
                 self._ocr_last_used = time.time()
                 results = self.ocr_reader.readtext(ocr_input)
                 self._ocr_last_used = time.time()
-                extracted_texts = [item[1] for item in results]
+
+                # Scale bounding boxes from OCR image space back to original image space
+                # so that reconstruction (which draws on the original-size image) places
+                # highlights in the correct positions.
+                scaled_results = []
+                for (bbox, text, conf) in results:
+                    scaled_bbox = [
+                        [p[0] * ocr_scale_x, p[1] * ocr_scale_y] for p in bbox
+                    ]
+                    scaled_results.append((scaled_bbox, text, conf))
+
+                extracted_texts = [item[1] for item in scaled_results]
                 gc.collect()
-                return extracted_texts, results
+                return extracted_texts, scaled_results
             except (OSError, ValueError, AttributeError) as e:
                 logger.error("Error during OCR: %s", e)
                 gc.collect()
@@ -780,7 +794,10 @@ class GrammarCorrectionProcessor:
             chunks.append(current_chunk)
         
         batch_size = max(1, getattr(settings, "MODEL_BATCH_CHUNKS", 1))
-        logger.info("Split text into %d chunks, processing in batches of %d", len(chunks), batch_size)
+        logger.info(
+            "Split text into %d chunks, processing in batches of %d (may take 1-3 min on 1 vCPU)",
+            len(chunks), batch_size
+        )
 
         corrected_chunks = []
         for start in range(0, len(chunks), batch_size):
@@ -792,6 +809,7 @@ class GrammarCorrectionProcessor:
 
         corrected_text = " ".join(corrected_chunks)
         gc.collect()
+        logger.info("Chunked grammar correction finished (%d chunks)", len(chunks))
 
         if corrected_text.strip() == text.strip():
             logger.info("No grammar errors found after chunked processing")
@@ -1111,62 +1129,64 @@ class GrammarCorrectionProcessor:
                 return None
 
             try:
-                # Load the original image using the path
-                # Memory optimization: Load image efficiently
                 img = Image.open(original_content).convert("RGB")
-                original_size = img.size  # Store original size before resizing
-                
-                # Resize if too large to prevent memory issues
-                max_dimension = 2048
-                if max(img.size) > max_dimension:
-                    ratio = max_dimension / max(img.size)
+                original_size = img.size
+
+                # Resize display image if too large (capped at 2048px on longest side)
+                display_max = 2048
+                display_scale_x, display_scale_y = 1.0, 1.0
+                if max(img.size) > display_max:
+                    ratio = display_max / max(img.size)
                     new_size = (int(img.size[0] * ratio), int(img.size[1] * ratio))
+                    display_scale_x = new_size[0] / original_size[0]
+                    display_scale_y = new_size[1] / original_size[1]
                     img = img.resize(new_size, Image.Resampling.LANCZOS)
                     logger.info("Resized image for reconstruction from %s to %s", original_size, new_size)
-                
+
                 draw = ImageDraw.Draw(img)
 
-                # Create a set of original words that were corrected for quick lookup
                 original_corrected_words_set = {
                     corr_dict['original_word'].lower()
                     for corr_dict in corrections
                     if corr_dict['original_word'] != corr_dict['corrected_word']
                 }
 
-                confidence_threshold = getattr(
-                    settings, "OCR_CONFIDENCE_THRESHOLD", 0.5
-                )
+                confidence_threshold = getattr(settings, "OCR_CONFIDENCE_THRESHOLD", 0.5)
 
                 for (bbox, text, confidence) in original_ocr_results:
-                    if confidence >= confidence_threshold:
-                        # Get the bounding box coordinates as integers
-                        x_coords = [int(p[0]) for p in bbox]
-                        y_coords = [int(p[1]) for p in bbox]
-                        x1, y1, x2, y2 = min(x_coords), min(y_coords), max(x_coords), max(y_coords)
+                    if confidence < confidence_threshold:
+                        continue
 
-                        # Attempt word-level highlighting within the bounding box
-                        block_text = text  # Use the original text from OCR
-                        block_text_lower = block_text.lower()
+                    # OCR bboxes are already in original-image space (scaled in extract_text).
+                    # Now scale them further to display-image space.
+                    x_coords = [p[0] * display_scale_x for p in bbox]
+                    y_coords = [p[1] * display_scale_y for p in bbox]
+                    x1, y1 = min(x_coords), min(y_coords)
+                    x2, y2 = max(x_coords), max(y_coords)
 
-                        # Iterate through the original words that were corrected
-                        for original_word_lower in original_corrected_words_set:
-                            # Find all occurrences of the original word within the block text
-                            # Use regex to find whole words
-                            for match in re.finditer(r'\b' + re.escape(original_word_lower) + r'\b', block_text_lower):
-                                start_index = match.start()
-                                word_length = len(match.group(0))
+                    block_text = text
+                    block_text_lower = block_text.lower()
 
-                                # Basic approximation for word position within the block
-                                block_width = x2 - x1
-                                char_width_approx = block_width / len(block_text) if len(block_text) > 0 else 0
+                    for original_word_lower in original_corrected_words_set:
+                        for match in re.finditer(
+                            r'\b' + re.escape(original_word_lower) + r'\b',
+                            block_text_lower
+                        ):
+                            start_index = match.start()
+                            word_length = len(match.group(0))
 
-                                word_x1 = x1 + (start_index * char_width_approx)
-                                word_y1 = y1
-                                word_x2 = word_x1 + (word_length * char_width_approx)
-                                word_y2 = y2
+                            block_width = x2 - x1
+                            char_width = block_width / len(block_text) if block_text else 0
 
-                                # Draw a highlight (red rectangle border) around the approximate word bounding box
-                                draw.rectangle([(word_x1, word_y1), (word_x2, word_y2)], outline='red', width=2)
+                            wx1 = x1 + start_index * char_width
+                            wx2 = wx1 + word_length * char_width
+                            # Add a small vertical pad so the box is clearly visible
+                            pad = max(2, int((y2 - y1) * 0.05))
+                            draw.rectangle(
+                                [(wx1, y1 - pad), (wx2, y2 + pad)],
+                                outline='red',
+                                width=3
+                            )
 
                 gc.collect()
                 return img
